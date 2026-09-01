@@ -68,7 +68,7 @@ from coherex.meeting_notes import generate_meeting_notes_markdown, group_speaker
 # STREAMLIT PAGE CONFIGURATION & CUSTOM STYLES
 # ==============================================================================
 st.set_page_config(
-    page_title="CohereX Studio",
+    page_title="CohereVoice Studio",
     page_icon="🎙️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -190,7 +190,7 @@ st.markdown(
     <div class="brand-header">
         <div class="brand-icon">🎙️</div>
         <div>
-            <h1 class="brand-title">CohereX Studio</h1>
+            <h1 class="brand-title">CohereVoice Studio</h1>
             <div class="brand-subtitle">AI-Powered Speech Recognition, Broadcast Subtitles & Meeting Intelligence</div>
         </div>
     </div>

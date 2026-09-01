@@ -1,13 +1,16 @@
-# 🎙️ CohereX Studio
+# 🎙️ CohereVoice Studio
 
-**CohereX Studio** is an advanced AI-powered speech recognition, subtitle generation, and meeting intelligence suite. Built on top of Cohere's state-of-the-art speech models, it delivers broadcast-grade subtitles, structured meeting minutes, speaker diarization, and dynamic multilingual translation with specialized support for **Egyptian Arabic & Arabic dialects**.
+**CohereVoice Studio** is an advanced AI-powered speech recognition, broadcast subtitle generation, and meeting intelligence suite. Built on top of Cohere's state-of-the-art transformer speech models, it delivers broadcast-grade subtitles, structured meeting minutes, speaker diarization, and dynamic multilingual translation with specialized optimization for **Egyptian Arabic & Arabic dialects**.
+
+> [!NOTE]
+> **Attribution & Acknowledgement**: This project builds upon and extends the foundational speech alignment and diarization architecture of [bakrianoo/cohereX](https://github.com/bakrianoo/cohereX) by **[bakrianoo](https://github.com/bakrianoo)**.
 
 ---
 
-## 🌟 Key Highlights
+## 🌟 Key Features
 
 - 🎬 **Dual Output Modes**:
-  - **Broadcast Subtitles Mode**: Generates tightly synchronized, broadcast-standard subtitle cues (1–2 lines, max 38 chars/line, 1.5–5s durations) with no screen-covering text walls.
+  - **Broadcast Subtitles Mode**: Generates tightly synchronized, broadcast-standard subtitle cues (1–2 lines, max 38 chars/line, 1.5–5s durations) with zero screen-covering text walls.
   - **Meeting Notes & Summaries Mode**: Produces structured Executive Overviews, Key Highlights, Speaker-by-Speaker Discussion Minutes, and Topic Timelines.
 - 🧠 **Intelligent Automatic Model Routing**:
   - **Arabic Media (`ar`)**: Automatically routes to `CohereLabs/cohere-transcribe-arabic-07-2026` (finetuned for Egyptian/Arab dialects, colloquial slang, and rapid dialogue).
@@ -26,14 +29,14 @@
 ## 📂 Clean Project Structure
 
 ```
-cohereX/
+coherevoice-studio/
 ├── app.py                          # Streamlit Studio Web UI
 ├── run_ui.bat                      # Windows 1-Click Launcher for Web UI
 ├── pyproject.toml                  # Python package configuration
 ├── README.md                       # User Guide & Documentation
 ├── TECHNICAL_ARCHITECTURE.md        # Deep-Dive Technical Reference & Pipeline Docs
 ├── .env                            # Environment keys (HF_TOKEN)
-├── coherex/                        # Core Python Package
+├── coherex/                        # Core Python Engine Library
 │   ├── __init__.py                 # Lazy export API
 │   ├── asr.py                      # Cohere ASR Model Loader & Transcriber
 │   ├── alignment.py                # wav2vec Phoneme Word Alignment
@@ -61,16 +64,15 @@ cohereX/
 ### 2. Setup Environment
 ```bash
 # Clone the repository
-git clone https://github.com/bakrianoo/cohereX.git
-cd cohereX
+git clone https://github.com/omarsalama4/coherevoice-studio.git
+cd coherevoice-studio
 
 # Create and activate environment
-conda create -n coherex python=3.11 -y
-conda activate coherex
+conda create -n coherevoice python=3.11 -y
+conda activate coherevoice
 
 # Install dependencies and local package
 pip install -e .
-pip install streamlit deep-translator
 ```
 
 ### 3. Authentication
@@ -125,7 +127,7 @@ python scripts/cli_meeting_notes.py "C:\path\to\meeting.mp4" --lang ar --transla
 
 ## 📄 Output Files Explained
 
-When processing any file (e.g. `video.mp4`), all output tracks are auto-saved directly to `F:\cohereX\outputs\`:
+When processing any file (e.g. `video.mp4`), all output tracks are auto-saved directly to `outputs/`:
 
 | File | Type | Description |
 | :--- | :--- | :--- |
@@ -149,7 +151,7 @@ For an in-depth explanation of how Voice Activity Detection, ASR decoding, force
 
 ## 🙏 Credits & Acknowledgements
 
-- **Original Project**: [bakrianoo/cohereX](https://github.com/bakrianoo/cohereX) by **[bakrianoo](https://github.com/bakrianoo)**.
+- **Original Foundation**: [bakrianoo/cohereX](https://github.com/bakrianoo/cohereX) by **[bakrianoo](https://github.com/bakrianoo)**.
 - **ASR Models**: [CohereLabs Transcribe](https://huggingface.co/CohereLabs).
 - **Speaker Diarization**: [PyAnnote Audio](https://github.com/pyannote/pyannote-audio).
 - **Phoneme Alignment**: [WhisperX](https://github.com/m-bain/whisperX) & [wav2vec 2.0](https://huggingface.co/facebook/wav2vec2-base-960h).

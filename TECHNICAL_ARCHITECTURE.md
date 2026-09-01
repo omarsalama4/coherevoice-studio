@@ -1,6 +1,6 @@
 # 🔬 Technical Architecture & Deep-Dive Engine Reference
 
-This document provides a comprehensive technical breakdown of **CohereX Studio**, explaining how audio ingestion, acoustic segmentation, speech recognition, forced alignment, speaker diarization, subtitle splitting, and dynamic neural translation work under the hood.
+This document provides a comprehensive technical breakdown of **CohereVoice Studio**, explaining how audio ingestion, acoustic segmentation, speech recognition, forced alignment, speaker diarization, subtitle splitting, and dynamic neural translation work under the hood.
 
 ---
 
