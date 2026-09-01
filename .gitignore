@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / ambient
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+py311/
+
+# Model and data caches
+.cache/
+*.onnx
+
+# Outputs and user media
+outputs/*
+!outputs/.gitkeep
+*.extracted_audio.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Secrets & Environment
+*.env
+.env
+.env.*
