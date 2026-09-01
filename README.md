@@ -2,9 +2,6 @@
 
 **CohereVoice Studio** is an advanced AI-powered speech recognition, broadcast subtitle generation, and meeting intelligence suite. Built on top of Cohere's state-of-the-art transformer speech models, it delivers broadcast-grade subtitles, structured meeting minutes, speaker diarization, and dynamic multilingual translation with specialized optimization for **Egyptian Arabic & Arabic dialects**.
 
-> [!NOTE]
-> **Attribution & Acknowledgement**: This project builds upon and extends the foundational speech alignment and diarization architecture of [bakrianoo/cohereX](https://github.com/bakrianoo/cohereX) by **[bakrianoo](https://github.com/bakrianoo)**.
-
 ---
 
 ## 🌟 Key Features
