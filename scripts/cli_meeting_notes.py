@@ -86,16 +86,20 @@ def main():
         print(f"🌍 Translating meeting notes into [{args.translate.upper()}]...")
         result = translate_result(result, target_lang=args.translate, source_lang=detected_lang)
 
+    # Create dedicated subfolder per media file
+    run_dir = out_dir / stem_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     # Step 5: Export structured meeting notes
     notes_md = generate_meeting_notes_markdown(result, title=f"Meeting Notes - {stem_name}", use_translated=bool(args.translate))
-    (out_dir / f"{stem_name}_meeting_notes.md").write_text(notes_md, encoding="utf-8")
-    (out_dir / f"{stem_name}_meeting_notes.txt").write_text(notes_md, encoding="utf-8")
+    (run_dir / f"{stem_name}_meeting_notes.md").write_text(notes_md, encoding="utf-8")
+    (run_dir / f"{stem_name}_meeting_notes.txt").write_text(notes_md, encoding="utf-8")
 
     # Step 6: Save JSON
-    with open(out_dir / f"{stem_name}.json", "w", encoding="utf-8") as jf:
+    with open(run_dir / f"{stem_name}.json", "w", encoding="utf-8") as jf:
         json.dump(result, jf, indent=2, ensure_ascii=False)
 
-    print(f"\n🎉 Meeting notes successfully generated! Saved to: {out_dir}")
+    print(f"\n🎉 Meeting notes successfully generated! Saved to: {run_dir}")
 
 
 if __name__ == "__main__":

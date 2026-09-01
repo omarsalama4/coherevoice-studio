@@ -491,8 +491,10 @@ if start_btn and media_path:
         overall_progress.progress(1.0)
         elapsed = time.time() - t0
 
-        # Save to Disk Based on Selected Mode
+        # Save to Disk in Dedicated Subfolder Named After Media File
         stem_name = Path(media_display_name).stem
+        run_output_dir = OUTPUTS_DIR / stem_name
+        run_output_dir.mkdir(parents=True, exist_ok=True)
         saved_paths = {}
 
         if pipeline_mode.startswith("🎬"):
@@ -501,29 +503,29 @@ if start_btn and media_path:
             cues_trans = generate_subtitles_from_segments(final_result.get("segments", []), max_chars_line, max_lines_cue, use_translated=True)
             cues_bilingual = generate_subtitles_from_segments(final_result.get("segments", []), max_chars_line, max_lines_cue, use_translated=True, bilingual=True)
 
-            orig_srt = OUTPUTS_DIR / f"{stem_name}_{detected_lang}.srt"
+            orig_srt = run_output_dir / f"{stem_name}_{detected_lang}.srt"
             orig_srt.write_text(export_srt(cues_orig), encoding="utf-8")
             saved_paths["orig_srt"] = orig_srt
 
-            orig_vtt = OUTPUTS_DIR / f"{stem_name}_{detected_lang}.vtt"
+            orig_vtt = run_output_dir / f"{stem_name}_{detected_lang}.vtt"
             orig_vtt.write_text(export_vtt(cues_orig), encoding="utf-8")
             saved_paths["orig_vtt"] = orig_vtt
 
             if enable_trans:
-                trans_srt = OUTPUTS_DIR / f"{stem_name}_{target_lang_code}.srt"
+                trans_srt = run_output_dir / f"{stem_name}_{target_lang_code}.srt"
                 trans_srt.write_text(export_srt(cues_trans), encoding="utf-8")
                 saved_paths["trans_srt"] = trans_srt
 
-                trans_vtt = OUTPUTS_DIR / f"{stem_name}_{target_lang_code}.vtt"
+                trans_vtt = run_output_dir / f"{stem_name}_{target_lang_code}.vtt"
                 trans_vtt.write_text(export_vtt(cues_trans), encoding="utf-8")
                 saved_paths["trans_vtt"] = trans_vtt
 
-                bi_srt = OUTPUTS_DIR / f"{stem_name}_bilingual.srt"
+                bi_srt = run_output_dir / f"{stem_name}_bilingual.srt"
                 bi_srt.write_text(export_srt(cues_bilingual), encoding="utf-8")
                 saved_paths["bilingual_srt"] = bi_srt
 
             # Save full metadata JSON
-            json_path = OUTPUTS_DIR / f"{stem_name}.json"
+            json_path = run_output_dir / f"{stem_name}.json"
             with open(json_path, "w", encoding="utf-8") as jf:
                 json.dump(final_result, jf, indent=2, ensure_ascii=False)
             saved_paths["json"] = json_path
@@ -531,15 +533,15 @@ if start_btn and media_path:
         else:
             # Meeting Notes Mode
             notes_md = generate_meeting_notes_markdown(final_result, title=f"Meeting Notes - {stem_name}", use_translated=enable_trans)
-            md_path = OUTPUTS_DIR / f"{stem_name}_meeting_notes.md"
+            md_path = run_output_dir / f"{stem_name}_meeting_notes.md"
             md_path.write_text(notes_md, encoding="utf-8")
             saved_paths["notes_md"] = md_path
 
-            txt_path = OUTPUTS_DIR / f"{stem_name}_meeting_notes.txt"
+            txt_path = run_output_dir / f"{stem_name}_meeting_notes.txt"
             txt_path.write_text(notes_md, encoding="utf-8")
             saved_paths["notes_txt"] = txt_path
 
-            json_path = OUTPUTS_DIR / f"{stem_name}.json"
+            json_path = run_output_dir / f"{stem_name}.json"
             with open(json_path, "w", encoding="utf-8") as jf:
                 json.dump(final_result, jf, indent=2, ensure_ascii=False)
             saved_paths["json"] = json_path
@@ -547,9 +549,10 @@ if start_btn and media_path:
         st.session_state["last_result"] = final_result
         st.session_state["media_name"] = media_display_name
         st.session_state["saved_paths"] = saved_paths
+        st.session_state["run_output_dir"] = run_output_dir
         st.session_state["pipeline_mode"] = pipeline_mode
 
-        stage_status.success(f"🎉 **Pipeline Completed in {elapsed:.1f}s! All files saved directly to disk.**")
+        stage_status.success(f"🎉 **Pipeline Completed in {elapsed:.1f}s! All files saved to `{run_output_dir}`.**")
         live_detail_box.empty()
 
     except Exception as e:
@@ -566,6 +569,7 @@ if "last_result" in st.session_state:
     res = st.session_state["last_result"]
     media_name = st.session_state.get("media_name", "audio")
     saved_paths = st.session_state.get("saved_paths", {})
+    run_dir = st.session_state.get("run_output_dir", OUTPUTS_DIR)
     mode = st.session_state.get("pipeline_mode", "Subtitles")
 
     st.markdown("---")
@@ -576,13 +580,15 @@ if "last_result" in st.session_state:
         f"""
         <div class="save-banner">
             <div>
-                <strong style="color: #4ADE80;">💾 Outputs Saved to Disk:</strong>
-                <div class="save-path">{OUTPUTS_DIR}</div>
+                <strong style="color: #4ADE80;">💾 Outputs Saved in Dedicated Run Folder:</strong>
+                <div class="save-path">{run_dir}</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True
     )
+    if st.button("📂 Open Run Folder in Explorer", use_container_width=False):
+        open_folder(run_dir)
 
     if mode.startswith("🎬"):
         tab_sub1, tab_sub2, tab_sub3, tab_sub4 = st.tabs(["📝 Subtitles Preview", "🔤 Arabic SRT", "🌍 English SRT", "📑 Bilingual SRT"])

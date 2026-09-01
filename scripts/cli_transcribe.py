@@ -77,30 +77,32 @@ def main():
     # Step 3: Translation (Optional)
     if args.translate:
         print(f"🌍 Translating subtitles into [{args.translate.upper()}]...")
-        result = translate_result(result, target_lang=args.translate, source_lang=detected_lang, bilingual=args.bilingual)
+    # Create dedicated subfolder per media file
+    run_dir = out_dir / stem_name
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 4: Export broadcast-timed subtitle cues
     print(f"⏱️ Formatting subtitle cues (max {args.max_chars} chars/line, max {args.max_lines} lines)...")
     segments = result.get("segments", [])
 
     cues_orig = generate_subtitles_from_segments(segments, args.max_chars, args.max_lines, use_translated=False)
-    (out_dir / f"{stem_name}_{detected_lang}.srt").write_text(export_srt(cues_orig), encoding="utf-8")
-    (out_dir / f"{stem_name}_{detected_lang}.vtt").write_text(export_vtt(cues_orig), encoding="utf-8")
+    (run_dir / f"{stem_name}_{detected_lang}.srt").write_text(export_srt(cues_orig), encoding="utf-8")
+    (run_dir / f"{stem_name}_{detected_lang}.vtt").write_text(export_vtt(cues_orig), encoding="utf-8")
 
     if args.translate:
         cues_trans = generate_subtitles_from_segments(segments, args.max_chars, args.max_lines, use_translated=True)
-        (out_dir / f"{stem_name}_{args.translate}.srt").write_text(export_srt(cues_trans), encoding="utf-8")
-        (out_dir / f"{stem_name}_{args.translate}.vtt").write_text(export_vtt(cues_trans), encoding="utf-8")
+        (run_dir / f"{stem_name}_{args.translate}.srt").write_text(export_srt(cues_trans), encoding="utf-8")
+        (run_dir / f"{stem_name}_{args.translate}.vtt").write_text(export_vtt(cues_trans), encoding="utf-8")
 
         if args.bilingual:
             cues_bi = generate_subtitles_from_segments(segments, args.max_chars, args.max_lines, use_translated=True, bilingual=True)
-            (out_dir / f"{stem_name}_bilingual.srt").write_text(export_srt(cues_bi), encoding="utf-8")
+            (run_dir / f"{stem_name}_bilingual.srt").write_text(export_srt(cues_bi), encoding="utf-8")
 
     # Step 5: Save JSON
-    with open(out_dir / f"{stem_name}.json", "w", encoding="utf-8") as jf:
+    with open(run_dir / f"{stem_name}.json", "w", encoding="utf-8") as jf:
         json.dump(result, jf, indent=2, ensure_ascii=False)
 
-    print(f"\n🎉 Subtitle generation complete! Files saved to: {out_dir}")
+    print(f"\n🎉 Subtitle generation complete! Files saved to: {run_dir}")
 
 
 if __name__ == "__main__":
