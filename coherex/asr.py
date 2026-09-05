@@ -121,12 +121,18 @@ class CohereAsrPipeline:
         combined_progress: bool = False,
         verbose: bool = False,
         progress_callback: ProgressCallback = None,
+        vad_options: Optional[dict] = None,
+        **kwargs,
     ) -> TranscriptionResult:
         if isinstance(audio, str):
             audio = load_audio(audio)
 
         language = self._validate_language(language or self.preset_language)
         batch_size = batch_size or self.batch_size
+
+        vad_params = dict(self._vad_params)
+        if vad_options is not None:
+            vad_params.update(vad_options)
 
         # Pre-process audio and merge chunks as defined by the VAD backend.
         if issubclass(type(self.vad_model), Vad):
@@ -140,8 +146,8 @@ class CohereAsrPipeline:
         vad_segments = merge_chunks(
             vad_segments,
             chunk_size,
-            onset=self._vad_params["vad_onset"],
-            offset=self._vad_params["vad_offset"],
+            onset=vad_params["vad_onset"],
+            offset=vad_params["vad_offset"],
         )
 
         segments: List[SingleSegment] = []
