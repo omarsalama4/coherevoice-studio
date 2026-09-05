@@ -69,3 +69,13 @@ def setup_logging(*args, **kwargs):
 def get_logger(*args, **kwargs):
     logging_module = _lazy_import("log_utils")
     return logging_module.get_logger(*args, **kwargs)
+
+
+def get_llm_client(*args, **kwargs):
+    llm = _lazy_import("llm")
+    return llm.get_llm_client(*args, **kwargs)
+
+
+def is_llm_available(*args, **kwargs):
+    llm = _lazy_import("llm")
+    return llm.is_llm_available(*args, **kwargs)

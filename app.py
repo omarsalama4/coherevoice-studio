@@ -7,6 +7,7 @@ Features:
 - Tight, Broadcast-Quality Subtitle Cues (No large screens of text)
 - Dynamic Neural Translation (Not word-by-word)
 - Direct Auto-Save to Disk for all outputs (.srt, .vtt, .txt, .md, .json)
+- 🧠 Integrated LLM (Google Gemini) for Professional MOM & Dialect-Aware Translation
 """
 
 import os
@@ -56,6 +57,29 @@ def load_hf_token_from_env() -> str:
     if token:
         os.environ["HF_TOKEN"] = token
     return token or ""
+
+
+def load_gemini_key_from_env() -> str:
+    """Auto-detects Gemini API key from environment or .env file."""
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key and (BASE_DIR / ".env").exists():
+        try:
+            with open(BASE_DIR / ".env", "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        k = k.strip().lower()
+                        v = v.strip().strip("'\"")
+                        if k in ["gemini_api_key", "gemini_key", "google_api_key"]:
+                            key = v
+                            break
+        except Exception:
+            pass
+    if key:
+        os.environ["GEMINI_API_KEY"] = key
+    return key or ""
+
 
 import coherex
 from coherex.utils import format_timestamp
@@ -137,6 +161,16 @@ CUSTOM_CSS = """
         color: #60A5FA;
         border: 1px solid rgba(59, 130, 246, 0.25);
     }
+    .pill-yellow {
+        background: rgba(234, 179, 8, 0.12);
+        color: #FACC15;
+        border: 1px solid rgba(234, 179, 8, 0.25);
+    }
+    .pill-purple {
+        background: rgba(168, 85, 247, 0.12);
+        color: #C084FC;
+        border: 1px solid rgba(168, 85, 247, 0.25);
+    }
 
     /* Mode Selection Banner */
     .mode-card {
@@ -179,6 +213,28 @@ CUSTOM_CSS = """
     .sub-text {
         font-size: 0.95rem;
         color: #F3F4F6;
+    }
+
+    /* LLM Badge */
+    .llm-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.2rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 0.5rem;
+    }
+    .llm-badge-active {
+        background: rgba(168, 85, 247, 0.15);
+        color: #C084FC;
+        border: 1px solid rgba(168, 85, 247, 0.3);
+    }
+    .llm-badge-fallback {
+        background: rgba(234, 179, 8, 0.12);
+        color: #FACC15;
+        border: 1px solid rgba(234, 179, 8, 0.25);
     }
 </style>
 """
@@ -244,6 +300,17 @@ def open_folder(folder_path: Path):
         st.warning(f"Could not open directory: {e}")
 
 
+def check_llm_available(api_key: str) -> bool:
+    """Check if the LLM (Gemini) is available with the given API key."""
+    if not api_key:
+        return False
+    try:
+        from coherex.llm import is_llm_available
+        return is_llm_available(api_key=api_key)
+    except Exception:
+        return False
+
+
 # ==============================================================================
 # SIDEBAR CONFIGURATION
 # ==============================================================================
@@ -294,16 +361,45 @@ with st.sidebar:
 
     st.info(f"🧠 **Active ASR Model:**\n`{model_desc}`")
 
+    st.markdown("---")
+    st.subheader("🔑 API Keys")
+
     # Hugging Face Auth Token
     default_hf_token = load_hf_token_from_env()
     hf_token = st.text_input(
         "Hugging Face Token",
         value=default_hf_token,
         type="password",
-        help="Loaded automatically from .env (hf_key)."
+        help="Required for ASR and diarization models. Auto-loaded from .env."
     )
     if hf_token:
         os.environ["HF_TOKEN"] = hf_token
+
+    # Gemini API Key
+    default_gemini_key = load_gemini_key_from_env()
+    gemini_api_key = st.text_input(
+        "Gemini API Key (LLM)",
+        value=default_gemini_key,
+        type="password",
+        help="Free from aistudio.google.com. Powers AI Meeting Minutes & smart translation."
+    )
+    if gemini_api_key:
+        os.environ["GEMINI_API_KEY"] = gemini_api_key
+
+    # LLM Status Indicator
+    llm_available = check_llm_available(gemini_api_key)
+    if llm_available:
+        st.markdown(
+            '<span class="status-pill pill-purple">🧠 Gemini LLM Connected</span>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            '<span class="status-pill pill-yellow">⚡ No LLM — Heuristic Mode</span>',
+            unsafe_allow_html=True
+        )
+        if not gemini_api_key:
+            st.caption("Add a free Gemini API key for AI-powered MOM & smart translation.")
 
     st.markdown("---")
     st.caption(f"📁 **Auto-Save Output Folder:**\n`{OUTPUTS_DIR}`")
@@ -388,9 +484,24 @@ with col_right:
                 with tc2:
                     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
                     is_bilingual = st.checkbox("Dual-Track Bilingual (EN + AR)", value=True)
+
+                # LLM translation indicator
+                if llm_available:
+                    st.markdown('<span class="llm-badge llm-badge-active">🧠 AI-Powered Translation</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="llm-badge llm-badge-fallback">⚡ Fast Translation</span>', unsafe_allow_html=True)
         else:
             # Meeting Notes Settings
-            st.caption("Generates Executive Overview, Speaker Discussion Turns, and Action Items.")
+            if llm_available:
+                st.markdown(
+                    '<span class="llm-badge llm-badge-active">🧠 AI-Powered MOM Generation</span>'
+                    '<span style="margin-left: 0.5rem; color: #9CA3AF; font-size: 0.82rem;">'
+                    'Executive Summary • Decisions • Action Items • Topics</span>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.caption("Generates Executive Overview, Speaker Discussion Turns, and Action Items.")
+
             enable_trans = st.checkbox("🌍 Translate Meeting Notes into Another Language", value=False)
             target_lang_code = "en"
             is_bilingual = False
@@ -400,6 +511,16 @@ with col_right:
 
         # Word alignment & Diarization
         enable_diarization = st.checkbox("👥 Identify & Label Speakers (Diarization)", value=True)
+        exact_speakers = None
+        if enable_diarization:
+            spk_c1, spk_c2 = st.columns([3, 2])
+            with spk_c1:
+                spk_mode = st.selectbox("Speaker Detection Mode", ["Auto-Detect (2-6 speakers)", "Exact Number of Speakers"], index=0)
+            with spk_c2:
+                if spk_mode == "Exact Number of Speakers":
+                    exact_speakers = st.number_input("Speaker Count", min_value=1, max_value=12, value=4)
+                else:
+                    exact_speakers = None
 
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
         start_btn = st.button(
@@ -414,6 +535,11 @@ with col_right:
 # EXECUTION WORKFLOW
 # ==============================================================================
 if start_btn and media_path:
+    # Determine total steps based on LLM availability and mode
+    is_meeting_mode = pipeline_mode.startswith("📋")
+    use_llm_pipeline = llm_available
+    total_steps = 6 if use_llm_pipeline else 5
+
     stage_status = st.empty()
     overall_progress = st.progress(0.0)
     live_detail_box = st.empty()
@@ -422,15 +548,15 @@ if start_btn and media_path:
         t0 = time.time()
         
         # Step 1: Audio Extraction
-        stage_status.info("🔊 **Step 1/5: Extracting and normalizing 16kHz mono audio...**")
+        stage_status.info(f"🔊 **Step 1/{total_steps}: Extracting and normalizing 16kHz mono audio...**")
         overall_progress.progress(0.10)
         audio_extracted_path = extract_audio_from_video(media_path)
         audio_array = coherex.load_audio(str(audio_extracted_path))
         live_detail_box.caption(f"✅ Audio extracted: {len(audio_array)/16000:.1f} seconds duration.")
 
         # Step 2: Load Model & Transcribe
-        stage_status.info(f"🎙️ **Step 2/5: Transcribing with {model_desc}...**")
-        overall_progress.progress(0.30)
+        stage_status.info(f"🎙️ **Step 2/{total_steps}: Transcribing with {model_desc}...**")
+        overall_progress.progress(0.25)
         asr_model = get_cohere_model(
             model_name=active_model_id,
             language_code=(None if lang_code == "auto" else lang_code),
@@ -447,8 +573,8 @@ if start_btn and media_path:
         live_detail_box.caption(f"✅ Recognized {len(asr_result.get('segments', []))} speech segments. Detected Language: [{detected_lang.upper()}].")
 
         # Step 3: Phoneme Alignment
-        stage_status.info("⏱️ **Step 3/5: Computing word-level timing...**")
-        overall_progress.progress(0.55)
+        stage_status.info(f"⏱️ **Step 3/{total_steps}: Computing word-level timing...**")
+        overall_progress.progress(0.45)
         try:
             align_model, align_metadata = get_align_model(language_code=detected_lang)
             aligned_result = coherex.align(
@@ -466,27 +592,45 @@ if start_btn and media_path:
 
         # Step 4: Speaker Diarization
         if enable_diarization:
-            stage_status.info("👥 **Step 4/5: Diarizing speakers...**")
-            overall_progress.progress(0.75)
+            stage_status.info(f"👥 **Step 4/{total_steps}: Diarizing speakers...**")
+            overall_progress.progress(0.60)
             try:
                 diarize_pipe = get_diarize_pipeline(hf_token=hf_token)
-                diarize_segments = diarize_pipe(audio_array)
-                final_result = coherex.assign_word_speakers(diarize_segments, final_result)
-                live_detail_box.caption("✅ Speaker labels assigned.")
+                diarize_kwargs = {}
+                if exact_speakers:
+                    diarize_kwargs["num_speakers"] = int(exact_speakers)
+                else:
+                    diarize_kwargs["min_speakers"] = 2
+                    diarize_kwargs["max_speakers"] = 8
+                    
+                diarize_segments = diarize_pipe(audio_array, **diarize_kwargs)
+                final_result = coherex.assign_word_speakers(diarize_segments, final_result, fill_nearest=True)
+                detected_spk_count = len(set(seg.get("speaker") for seg in final_result.get("segments", []) if seg.get("speaker")))
+                live_detail_box.caption(f"✅ Diarization identified {detected_spk_count} distinct speakers.")
             except Exception as diarize_err:
                 live_detail_box.caption(f"ℹ️ Diarization note: {diarize_err}")
 
-        # Step 5: Subtitle Formatting or Translation
+        # Step 5: Translation (for subtitles or meeting notes)
         if enable_trans:
-            stage_status.info(f"🌍 **Step 5/5: Translating into [{target_lang_code.upper()}]...**")
-            overall_progress.progress(0.90)
+            trans_engine = "🧠 AI-Powered" if use_llm_pipeline else "⚡ Fast"
+            stage_status.info(f"🌍 **Step 5/{total_steps}: {trans_engine} Translation into [{target_lang_code.upper()}]...**")
+            overall_progress.progress(0.75)
             final_result = translate_result(
                 final_result,
                 target_lang=target_lang_code,
                 source_lang=detected_lang,
-                bilingual=is_bilingual
+                bilingual=is_bilingual,
+                use_llm=use_llm_pipeline,
+                gemini_api_key=gemini_api_key,
             )
-            live_detail_box.caption(f"✅ Translated into {target_lang_code.upper()}.")
+            engine_used = "Gemini AI" if use_llm_pipeline else "Google GTX"
+            live_detail_box.caption(f"✅ Translated into {target_lang_code.upper()} via {engine_used}.")
+
+        # Step 6 (LLM only): AI Meeting Intelligence
+        if is_meeting_mode and use_llm_pipeline:
+            stage_status.info(f"🧠 **Step {total_steps}/{total_steps}: Generating AI-Powered Meeting Minutes...**")
+            overall_progress.progress(0.90)
+            live_detail_box.caption("Analyzing transcript, extracting decisions, action items, and topics...")
 
         overall_progress.progress(1.0)
         elapsed = time.time() - t0
@@ -532,13 +676,45 @@ if start_btn and media_path:
 
         else:
             # Meeting Notes Mode
-            notes_md = generate_meeting_notes_markdown(final_result, title=f"Meeting Notes - {stem_name}", use_translated=enable_trans)
-            md_path = run_output_dir / f"{stem_name}_meeting_notes.md"
-            md_path.write_text(notes_md, encoding="utf-8")
-            saved_paths["notes_md"] = md_path
+            # Generate AI-Powered or Heuristic MOM (original language)
+            from datetime import datetime
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            notes_ar = generate_meeting_notes_markdown(
+                final_result,
+                title=f"حوار وملاحظات الاجتماع - {stem_name}",
+                use_translated=False,
+                gemini_api_key=gemini_api_key,
+                meeting_date=today,
+                use_llm=use_llm_pipeline,
+            )
+            md_ar_path = run_output_dir / f"{stem_name}_meeting_notes_ar.md"
+            md_ar_path.write_text(notes_ar, encoding="utf-8")
+            saved_paths["notes_ar_md"] = md_ar_path
+
+            # Mark if LLM was used for display purposes
+            saved_paths["_llm_used"] = use_llm_pipeline and ("🎯 Action Items" in notes_ar or "## ✅ Decisions" in notes_ar)
+
+            if enable_trans:
+                # For translated notes: generate English MOM directly via LLM, or translate heuristic
+                notes_trans = generate_meeting_notes_markdown(
+                    final_result,
+                    title=f"Meeting Notes - {stem_name}",
+                    use_translated=True,
+                    target_lang=target_lang_code,
+                    gemini_api_key=gemini_api_key,
+                    meeting_date=today,
+                    use_llm=use_llm_pipeline,
+                )
+                md_trans_path = run_output_dir / f"{stem_name}_meeting_notes_{target_lang_code}.md"
+                md_trans_path.write_text(notes_trans, encoding="utf-8")
+                saved_paths["notes_trans_md"] = md_trans_path
+                main_notes = notes_trans
+            else:
+                main_notes = notes_ar
 
             txt_path = run_output_dir / f"{stem_name}_meeting_notes.txt"
-            txt_path.write_text(notes_md, encoding="utf-8")
+            txt_path.write_text(main_notes, encoding="utf-8")
             saved_paths["notes_txt"] = txt_path
 
             json_path = run_output_dir / f"{stem_name}.json"
@@ -552,7 +728,8 @@ if start_btn and media_path:
         st.session_state["run_output_dir"] = run_output_dir
         st.session_state["pipeline_mode"] = pipeline_mode
 
-        stage_status.success(f"🎉 **Pipeline Completed in {elapsed:.1f}s! All files saved to `{run_output_dir}`.**")
+        engine_info = " (AI-Powered)" if use_llm_pipeline else ""
+        stage_status.success(f"🎉 **Pipeline Completed{engine_info} in {elapsed:.1f}s! All files saved to `{run_output_dir}`.**")
         live_detail_box.empty()
 
     except Exception as e:
@@ -625,8 +802,42 @@ if "last_result" in st.session_state:
                 st.download_button("⬇️ Download Bilingual SRT", saved_paths["bilingual_srt"].read_text(encoding="utf-8"), file_name=saved_paths["bilingual_srt"].name)
 
     else:
-        # Meeting Notes View
-        if "notes_md" in saved_paths:
-            notes_content = saved_paths["notes_md"].read_text(encoding="utf-8")
-            st.markdown(notes_content)
-            st.download_button("⬇️ Download Meeting Notes (.md)", notes_content, file_name=saved_paths["notes_md"].name)
+        # Meeting Notes View with Dedicated Tabs
+        was_llm = saved_paths.get("_llm_used", False)
+
+        tab_list = ["📋 Meeting Minutes"]
+        if "notes_trans_md" in saved_paths:
+            tab_list.append("🌍 Translated Notes")
+        tab_list.append("📄 Plain Text")
+
+        tabs = st.tabs(tab_list)
+
+        with tabs[0]:
+            if "notes_ar_md" in saved_paths:
+                if was_llm:
+                    st.markdown(
+                        '<span class="llm-badge llm-badge-active" style="margin-bottom: 0.8rem; display: inline-block;">'
+                        '🧠 AI-Generated Meeting Minutes</span>',
+                        unsafe_allow_html=True
+                    )
+                notes_ar_text = saved_paths["notes_ar_md"].read_text(encoding="utf-8")
+                st.markdown(notes_ar_text)
+                st.download_button("⬇️ Download Meeting Minutes (Markdown)", notes_ar_text, file_name=saved_paths["notes_ar_md"].name)
+
+        if "notes_trans_md" in saved_paths and len(tabs) > 1:
+            with tabs[1]:
+                if was_llm:
+                    st.markdown(
+                        '<span class="llm-badge llm-badge-active" style="margin-bottom: 0.8rem; display: inline-block;">'
+                        '🧠 AI-Generated & Translated</span>',
+                        unsafe_allow_html=True
+                    )
+                notes_trans_text = saved_paths["notes_trans_md"].read_text(encoding="utf-8")
+                st.markdown(notes_trans_text)
+                st.download_button("⬇️ Download Translated Notes (Markdown)", notes_trans_text, file_name=saved_paths["notes_trans_md"].name)
+
+        with tabs[-1]:
+            if "notes_txt" in saved_paths:
+                txt_content = saved_paths["notes_txt"].read_text(encoding="utf-8")
+                st.text_area("Raw Meeting Minutes", txt_content, height=400)
+                st.download_button("⬇️ Download Plain Text (.txt)", txt_content, file_name=saved_paths["notes_txt"].name)

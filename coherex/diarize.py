@@ -93,14 +93,52 @@ class DiarizationPipeline:
         self,
         model_name=None,
         token=None,
+        use_auth_token=None,
         device: Optional[Union[str, torch.device]] = "cpu",
         cache_dir=None,
+        **kwargs,
     ):
         if isinstance(device, str):
             device = torch.device(device)
-        model_config = model_name or "pyannote/speaker-diarization-community-1"
-        logger.info(f"Loading diarization model: {model_config}")
-        self.model = Pipeline.from_pretrained(model_config, token=token, cache_dir=cache_dir).to(device)
+
+        # Resolve Hugging Face token
+        auth_token = token or use_auth_token or os.environ.get("HF_TOKEN") or os.environ.get("hf_key") or os.environ.get("HUGGINGFACE_TOKEN")
+        if not auth_token:
+            # Check local .env file
+            try:
+                from pathlib import Path
+                env_p = Path(__file__).resolve().parent.parent / ".env"
+                if env_p.exists():
+                    for line in env_p.read_text().splitlines():
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            if k.strip().lower() in ["hf_token", "hf_key", "huggingface_token"]:
+                                auth_token = v.strip().strip("'\"")
+                                break
+            except Exception:
+                pass
+
+        model_candidates = [
+            model_name or "pyannote/speaker-diarization-community-1",
+            "pyannote/speaker-diarization-3.1",
+        ] if not model_name else [model_name, "pyannote/speaker-diarization-community-1"]
+
+        loaded_pipe = None
+        last_err = None
+        for cand in model_candidates:
+            try:
+                logger.info(f"Loading diarization model candidate: {cand}")
+                loaded_pipe = Pipeline.from_pretrained(cand, token=auth_token, cache_dir=cache_dir)
+                if loaded_pipe is not None:
+                    break
+            except Exception as e:
+                last_err = e
+                logger.warning(f"Could not load diarization model '{cand}': {e}")
+
+        if loaded_pipe is None:
+            raise RuntimeError(f"Failed to load speaker diarization pipeline. Last error: {last_err}")
+
+        self.model = loaded_pipe.to(device)
 
     def __call__(
         self,
@@ -186,7 +224,7 @@ def assign_word_speakers(
     diarize_df: pd.DataFrame,
     transcript_result: Union[AlignedTranscriptionResult, TranscriptionResult],
     speaker_embeddings: Optional[dict[str, list[float]]] = None,
-    fill_nearest: bool = False,
+    fill_nearest: bool = True,
 ) -> Union[AlignedTranscriptionResult, TranscriptionResult]:
     """
     Assign speakers to words and segments in the transcript.
