@@ -235,14 +235,23 @@ def generate_llm_meeting_notes(
 
     try:
         logger.info("Generating AI-powered MOM [speakers=%d, duration=%s]", num_speakers, duration_str)
-        mom = client.generate_mom(
-            transcript=transcript_text,
-            meeting_date=meeting_date,
-            duration=duration_str,
-            num_speakers=num_speakers,
-            source_language=lang_name,
-        )
-        markdown = _format_mom_as_markdown(mom)
+        if hasattr(client, "generate_mom_markdown"):
+            markdown = client.generate_mom_markdown(
+                transcript=transcript_text,
+                meeting_date=meeting_date,
+                duration=duration_str,
+                num_speakers=num_speakers,
+                source_language=lang_name,
+            )
+        else:
+            mom = client.generate_mom(
+                transcript=transcript_text,
+                meeting_date=meeting_date,
+                duration=duration_str,
+                num_speakers=num_speakers,
+                source_language=lang_name,
+            )
+            markdown = _format_mom_as_markdown(mom)
         logger.info("AI MOM generated successfully (%d chars)", len(markdown))
         return markdown
 

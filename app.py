@@ -300,10 +300,8 @@ def open_folder(folder_path: Path):
         st.warning(f"Could not open directory: {e}")
 
 
-def check_llm_available(api_key: str) -> bool:
-    """Check if the LLM (Gemini) is available with the given API key."""
-    if not api_key:
-        return False
+def check_llm_available(api_key: str = "") -> bool:
+    """Check if any LLM (local Ollama or cloud Gemini) is available."""
     try:
         from coherex.llm import is_llm_available
         return is_llm_available(api_key=api_key)
@@ -362,35 +360,31 @@ with st.sidebar:
     st.info(f"🧠 **Active ASR Model:**\n`{model_desc}`")
 
     st.markdown("---")
-    st.subheader("🔑 API Keys")
+    st.subheader("🧠 LLM Intelligence Engine")
 
-    # Hugging Face Auth Token
-    default_hf_token = load_hf_token_from_env()
-    hf_token = st.text_input(
-        "Hugging Face Token",
-        value=default_hf_token,
-        type="password",
-        help="Required for ASR and diarization models. Auto-loaded from .env."
-    )
-    if hf_token:
-        os.environ["HF_TOKEN"] = hf_token
-
-    # Gemini API Key
+    from coherex.llm import get_llm_backend_info, get_local_llm_client
     default_gemini_key = load_gemini_key_from_env()
-    gemini_api_key = st.text_input(
-        "Gemini API Key (LLM)",
-        value=default_gemini_key,
-        type="password",
-        help="Free from aistudio.google.com. Powers AI Meeting Minutes & smart translation."
-    )
-    if gemini_api_key:
-        os.environ["GEMINI_API_KEY"] = gemini_api_key
+    backend_info = get_llm_backend_info(api_key=default_gemini_key)
 
-    # LLM Status Indicator
-    llm_available = check_llm_available(gemini_api_key)
-    if llm_available:
+    local_client = get_local_llm_client()
+    installed_local_models = local_client.get_installed_models() if local_client else []
+
+    if backend_info["has_local"]:
         st.markdown(
-            '<span class="status-pill pill-purple">🧠 Gemini LLM Connected</span>',
+            f'<span class="status-pill pill-green">🟢 Local LLM: {backend_info["local_model"]}</span>',
+            unsafe_allow_html=True
+        )
+        if len(installed_local_models) > 1:
+            chosen_local_model = st.selectbox(
+                "Select Local Model",
+                installed_local_models,
+                index=installed_local_models.index(backend_info["local_model"]) if backend_info["local_model"] in installed_local_models else 0
+            )
+            local_client.set_model(chosen_local_model)
+        st.caption("🔒 100% Offline GPU Processing — No external APIs or data sent.")
+    elif backend_info["has_cloud"]:
+        st.markdown(
+            '<span class="status-pill pill-purple">☁️ Cloud LLM (Gemini 2.0 Flash)</span>',
             unsafe_allow_html=True
         )
     else:
@@ -398,8 +392,30 @@ with st.sidebar:
             '<span class="status-pill pill-yellow">⚡ No LLM — Heuristic Mode</span>',
             unsafe_allow_html=True
         )
-        if not gemini_api_key:
-            st.caption("Add a free Gemini API key for AI-powered MOM & smart translation.")
+        st.caption("Run Ollama (`ollama serve`) with Qwen 2.5 for local offline AI meeting minutes.")
+
+    # Optional Cloud API Key Configuration (Collapsed)
+    with st.expander("🔑 Optional API Keys (HF / Cloud LLM)", expanded=False):
+        default_hf_token = load_hf_token_from_env()
+        hf_token = st.text_input(
+            "Hugging Face Token",
+            value=default_hf_token,
+            type="password",
+            help="Required for gated ASR and diarization models. Auto-loaded from .env."
+        )
+        if hf_token:
+            os.environ["HF_TOKEN"] = hf_token
+
+        gemini_api_key = st.text_input(
+            "Gemini API Key (Optional Cloud Fallback)",
+            value=default_gemini_key,
+            type="password",
+            help="Optional. Only used if local LLM is not running."
+        )
+        if gemini_api_key:
+            os.environ["GEMINI_API_KEY"] = gemini_api_key
+
+    llm_available = backend_info["has_local"] or backend_info["has_cloud"]
 
     st.markdown("---")
     st.caption(f"📁 **Auto-Save Output Folder:**\n`{OUTPUTS_DIR}`")
