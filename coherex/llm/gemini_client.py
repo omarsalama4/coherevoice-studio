@@ -2,7 +2,7 @@
 """
 Google Gemini LLM client for CohereX.
 Implements professional Meeting Minutes generation and dialect-aware translation
-using Google Gemini 2.0 Flash via the google-genai SDK.
+using the google-genai SDK.
 """
 
 import os
@@ -18,8 +18,8 @@ from coherex.llm.schemas import (
     TopicDiscussion,
 )
 from coherex.llm.prompts import (
-    MOM_SYSTEM_PROMPT,
-    MOM_USER_TEMPLATE,
+    ADAPTIVE_MOM_SYSTEM_PROMPT,
+    ADAPTIVE_MOM_USER_TEMPLATE,
     TRANSLATION_SYSTEM_PROMPT,
     SUBTITLE_TRANSLATION_TEMPLATE,
     MEETING_NOTES_TRANSLATION_TEMPLATE,
@@ -66,7 +66,7 @@ def _lang_name(code: str) -> str:
 
 class GeminiClient(LLMClient):
     """
-    Google Gemini 2.0 Flash LLM client.
+    Google Gemini LLM client.
     
     Uses the free-tier google-genai SDK for:
     - Structured MOM generation with JSON schema enforcement
@@ -76,9 +76,11 @@ class GeminiClient(LLMClient):
     Free tier limits: 15 RPM, 1M tokens/min, 1,500 requests/day.
     """
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.0-flash"):
+    provider_name = "gemini"
+
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
-        self._model = model
+        self._model = model or os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
         self._client = None
 
         if self._api_key:
@@ -93,6 +95,14 @@ class GeminiClient(LLMClient):
     def is_available(self) -> bool:
         """Check if Gemini API key is configured and client is initialized."""
         return self._client is not None and bool(self._api_key)
+
+    def get_active_model(self) -> str:
+        """Return the configured model identifier for provenance."""
+        return self._model
+
+    def get_active_model(self) -> str:
+        """Return the configured Gemini model identifier for provenance."""
+        return self._model
 
     # ------------------------------------------------------------------
     # Meeting Minutes Generation
@@ -115,7 +125,7 @@ class GeminiClient(LLMClient):
         from google import genai
         from google.genai import types
 
-        user_prompt = MOM_USER_TEMPLATE.format(
+        user_prompt = ADAPTIVE_MOM_USER_TEMPLATE.format(
             meeting_date=meeting_date,
             duration=duration or "Unknown",
             num_speakers=num_speakers or "Unknown",
@@ -197,7 +207,7 @@ class GeminiClient(LLMClient):
                 contents=[
                     types.Content(
                         role="user",
-                        parts=[types.Part(text=MOM_SYSTEM_PROMPT + "\n\n" + user_prompt)],
+                        parts=[types.Part(text=ADAPTIVE_MOM_SYSTEM_PROMPT + "\n\n" + user_prompt)],
                     )
                 ],
                 config=types.GenerateContentConfig(
@@ -324,22 +334,17 @@ class GeminiClient(LLMClient):
                 raw = response.text.strip()
                 translations = json.loads(raw)
 
-                if isinstance(translations, list):
-                    # Ensure we have the right number of translations
-                    while len(translations) < len(batch):
-                        translations.append(batch[len(translations)])
-                    all_translations.extend(translations[: len(batch)])
+                if isinstance(translations, list) and len(translations) == len(batch):
+                    all_translations.extend(translations)
                 else:
-                    logger.warning("Unexpected Gemini batch response format, falling back")
-                    all_translations.extend(batch)
+                    raise RuntimeError("Gemini returned the wrong number of subtitle translations")
 
             except Exception as e:
                 logger.warning(
                     "Gemini batch translation failed for batch %d-%d: %s",
                     batch_start, batch_start + len(batch), e
                 )
-                # Fall back: return originals for this batch
-                all_translations.extend(batch)
+                raise RuntimeError("Gemini batch translation failed") from e
 
         return all_translations
 

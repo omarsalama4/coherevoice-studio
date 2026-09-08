@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 import torch
 
-env_file = Path(r"F:\cohereX\.env")
+env_file = Path(__file__).resolve().parent.parent / ".env"
 if env_file.exists():
     for line in env_file.read_text().splitlines():
         if "=" in line and not line.startswith("#"):

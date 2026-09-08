@@ -1,0 +1,20 @@
+# Top-level versions validated on Windows, Python 3.11, on 2026-09-05.
+# PyTorch CUDA wheel selection remains platform/GPU-specific.
+accelerate==1.14.0
+google-genai==2.22.0
+huggingface-hub==1.29.0
+langdetect==1.0.9
+librosa==0.11.0
+numpy==2.4.6
+omegaconf==2.3.1
+pandas==3.0.5
+protobuf==7.36.0
+pyannote-audio==4.0.7
+pydantic==2.13.5
+pytest==9.0.3
+sentencepiece==0.2.2
+soundfile==0.14.0
+streamlit==1.62.0
+torch==2.11.0
+torchaudio==2.11.0
+transformers==5.16.1

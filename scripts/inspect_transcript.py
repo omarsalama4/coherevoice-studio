@@ -1,10 +1,15 @@
 import json
 import sys
+import argparse
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-p = r"F:\cohereX\outputs\WhatsApp Audio 2026-09-05 at 4.54.20 PM\WhatsApp Audio 2026-09-05 at 4.54.20 PM.json"
+parser = argparse.ArgumentParser()
+parser.add_argument("transcript_json")
+args = parser.parse_args()
+p = str(Path(args.transcript_json).resolve(strict=True))
 with open(p, encoding="utf-8") as f:
     data = json.load(f)
 

@@ -4,6 +4,7 @@ C. Max Bain
 """
 from dataclasses import dataclass
 from typing import Iterable, Optional, Union, List
+import re
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,7 @@ import torchaudio
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
 from coherex.audio import SAMPLE_RATE, load_audio
-from coherex.utils import interpolate_nans, PUNKT_LANGUAGES
+from coherex.utils import interpolate_nans
 from coherex.schema import (
     AlignedTranscriptionResult,
     SingleSegment,
@@ -21,8 +22,6 @@ from coherex.schema import (
     SegmentData,
     ProgressCallback,
 )
-import nltk
-from nltk.data import load as nltk_load
 from coherex.log_utils import get_logger
 
 logger = get_logger(__name__)
@@ -143,16 +142,15 @@ def align(
     model_lang = align_model_metadata["language"]
     model_type = align_model_metadata["type"]
 
-    # Use language-specific Punkt model if available otherwise fallback to single span.
-    punkt_lang = PUNKT_LANGUAGES.get(model_lang, 'english')
-    sentence_splitter = None
-    try:
-        sentence_splitter = nltk_load(f'tokenizers/punkt_tab/{punkt_lang}.pickle')
-    except Exception:
-        try:
-            sentence_splitter = nltk_load(f'tokenizers/punkt/{punkt_lang}.pickle')
-        except Exception:
-            sentence_splitter = None
+    # Sentence spans are derived locally. Avoid loading serialized NLP artifacts
+    # for a task that only needs punctuation boundaries.
+    def sentence_spans(value: str):
+        spans = [
+            (match.start(), max(match.start(), match.end() - 1))
+            for match in re.finditer(r"[^.!?؟\n]+(?:[.!?؟]+|$)", value)
+            if match.group(0).strip()
+        ]
+        return spans or [(0, max(0, len(value) - 1))]
 
     # 1. Preprocess to keep only characters in dictionary
     total_segments = len(transcript)
@@ -191,25 +189,19 @@ def align(
                 clean_char.append(char_)
                 clean_cdx.append(cdx)
             elif char_ not in (" ", "|"):
-                # unknown char (digit, symbol, foreign script) — use wildcard
-                clean_char.append(char_)
-                clean_cdx.append(cdx)
+                # Never force an unsupported character onto an arbitrary high-
+                # probability token. Its word timing is interpolated later.
+                logger.debug("Skipping character unsupported by alignment vocabulary: %r", char_)
 
         clean_wdx = list(range(len(per_word)))
 
-        if sentence_splitter is not None:
-            try:
-                sentence_spans = list(sentence_splitter.span_tokenize(text))
-            except Exception:
-                sentence_spans = [(0, len(text))]
-        else:
-            sentence_spans = [(0, len(text))]
+        spans = sentence_spans(text)
 
         segment_data[sdx] = {
             "clean_char": clean_char,
             "clean_cdx": clean_cdx,
             "clean_wdx": clean_wdx,
-            "sentence_spans": sentence_spans
+            "sentence_spans": spans
         }
 
     aligned_segments: List[SingleAlignedSegment] = []
@@ -279,18 +271,7 @@ def align(
             if char == '[pad]' or char == '<pad>':
                 blank_id = code
 
-        # Build tokens, mapping unknown chars to a wildcard column
-        has_wildcard = any(c not in model_dictionary for c in text_clean)
-        if has_wildcard:
-            # Extend emission with a wildcard column: max non-blank score per frame
-            non_blank_mask = torch.ones(emission.size(1), dtype=torch.bool)
-            non_blank_mask[blank_id] = False
-            wildcard_col = emission[:, non_blank_mask].max(dim=1).values
-            emission = torch.cat([emission, wildcard_col.unsqueeze(1)], dim=1)
-            wildcard_id = emission.size(1) - 1
-            tokens = [model_dictionary.get(c, wildcard_id) for c in text_clean]
-        else:
-            tokens = [model_dictionary[c] for c in text_clean]
+        tokens = [model_dictionary[c] for c in text_clean]
 
         trellis = get_trellis(emission, tokens, blank_id)
         path = backtrack(trellis, emission, tokens, blank_id)
@@ -326,7 +307,7 @@ def align(
                 }
             )
 
-            # increment word_idx, nltk word tokenization would probably be more robust here, but us space for now...
+            # Increment the simple whitespace-based word index.
             if model_lang in LANGUAGES_WITHOUT_SPACES:
                 word_idx += 1
             elif cdx == len(text) - 1 or text[cdx+1] == " ":

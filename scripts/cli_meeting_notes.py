@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import argparse
+import uuid
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -56,8 +57,12 @@ def main():
     print(f"🧠 Selected Model: {model_id} (Language: {args.lang})")
 
     # Step 1: Extract audio if video
-    audio_path = extract_audio_from_video(media_path)
-    audio_array = coherex.load_audio(str(audio_path))
+    temp_audio = out_dir / f".{stem_name}.{uuid.uuid4().hex}.wav"
+    audio_path = extract_audio_from_video(media_path, output_path=temp_audio)
+    try:
+        audio_array = coherex.load_audio(str(audio_path))
+    finally:
+        Path(audio_path).unlink(missing_ok=True)
 
     # Step 2: Transcribe
     print("🎙️ Transcribing speech...")
@@ -65,10 +70,10 @@ def main():
         model_name=model_id,
         device="cuda" if torch.cuda.is_available() else "cpu",
         batch_size=args.batch_size,
-        language=(None if args.lang == "auto" else args.lang)
+        language=None if args.lang == "auto" else args.lang,
     )
-    result = model.transcribe(audio_array, batch_size=args.batch_size)
-    detected_lang = result.get("language", args.lang)
+    detected_lang = coherex.detect_language(model, audio_array) if args.lang == "auto" else args.lang
+    result = model.transcribe(audio_array, language=detected_lang, batch_size=args.batch_size)
 
     # Step 3: Diarization (Optional)
     token = os.environ.get("HF_TOKEN")
@@ -82,6 +87,7 @@ def main():
             print(f"ℹ️ Diarization skipped: {e}")
 
     # Step 4: Translation (Optional)
+    source_result = result
     if args.translate:
         print(f"🌍 Translating meeting notes into [{args.translate.upper()}]...")
         result = translate_result(result, target_lang=args.translate, source_lang=detected_lang)
@@ -91,7 +97,16 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 5: Export structured meeting notes
-    notes_md = generate_meeting_notes_markdown(result, title=f"Meeting Notes - {stem_name}", use_translated=bool(args.translate))
+    notes_md = generate_meeting_notes_markdown(
+        source_result,
+        title=f"Meeting Notes - {stem_name}",
+        allow_heuristic_fallback=False,
+    )
+    if args.translate:
+        client = coherex.get_llm_client()
+        if client is None:
+            raise RuntimeError("Meeting-note translation requires a configured LLM provider")
+        notes_md = client.translate_meeting_notes(notes_md, source_lang=detected_lang, target_lang=args.translate)
     (run_dir / f"{stem_name}_meeting_notes.md").write_text(notes_md, encoding="utf-8")
     (run_dir / f"{stem_name}_meeting_notes.txt").write_text(notes_md, encoding="utf-8")
 

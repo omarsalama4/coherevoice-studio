@@ -2,25 +2,16 @@
 """
 General-Purpose Dynamic Subtitle & Transcript Translator for CohereX.
 
-Two translation engines:
-1. LLM-Powered (Gemini): Context-aware, dialect-savvy batch translation that
-   understands Egyptian Arabic idioms, code-switching, and conversational tone.
-2. Fast Fallback (Google GTX): Per-segment neural translation via the Google
-   Translate GTX endpoint with deep-translator backup.
+Translation is performed only by a configured LLM provider.
 
-The module auto-detects LLM availability and falls back gracefully.
+1. LLM-Powered: Context-aware, dialect-savvy batch translation that
+   understands Egyptian Arabic idioms, code-switching, and conversational tone.
 """
 
 import re
-import os
 import sys
 import copy
-import json
-import time
 import logging
-import urllib.parse
-import urllib.request
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -87,61 +78,72 @@ def polish_translated_text(text: str) -> str:
     return text
 
 
+def validate_translation_batch(
+    source_texts: List[str], translated_texts: List[str], target_lang: str
+) -> None:
+    """Reject incomplete or obviously untranslated subtitle batches."""
+    if len(translated_texts) != len(source_texts):
+        raise TranslationUnavailableError(
+            f"Translation count mismatch: expected {len(source_texts)}, got {len(translated_texts)}"
+        )
+    for index, (source, translated) in enumerate(zip(source_texts, translated_texts), 1):
+        if not isinstance(translated, str) or (source.strip() and not translated.strip()):
+            raise TranslationUnavailableError(f"Translation {index} is empty or not text")
+        if target_lang.lower().startswith("en") and re.search(r"[\u0600-\u06ff]", source):
+            if translated.strip() == source.strip():
+                raise TranslationUnavailableError(f"Translation {index} copied the Arabic source")
+            arabic_chars = len(re.findall(r"[\u0600-\u06ff]", translated))
+            letters = len(re.findall(r"[A-Za-z\u0600-\u06ff]", translated))
+            if letters and arabic_chars / letters > 0.10:
+                raise TranslationUnavailableError(
+                    f"Translation {index} contains excessive Arabic script for an English track"
+                )
+
+
 # ==============================================================================
-# FAST FALLBACK: Google GTX Translation
+# DISABLED LEGACY FALLBACK COMPATIBILITY API
 # ==============================================================================
+
+class TranslationUnavailableError(RuntimeError):
+    """Raised when no configured, trustworthy translation provider is available."""
+
 
 def raw_neural_translate(text: str, source_lang: str = "auto", target_lang: str = "en") -> str:
     """
-    High-speed, general-purpose neural translation using Google Translate GTX engine
-    with fallback to deep-translator. Completely dynamic and free of hardcoded phrase maps.
+    Compatibility entry point retained for callers. Public unofficial translation
+    endpoints are intentionally unsupported; configure an LLM provider instead.
     """
     if not text or not text.strip():
         return ""
 
-    sl = "auto" if source_lang in ["auto", None, ""] else source_lang
-    tl = target_lang.split("-")[0] if "-" in target_lang and target_lang not in ["zh-CN", "zh-TW"] else target_lang
-
-    try:
-        url = (
-            "https://translate.googleapis.com/translate_a/single?client=gtx&sl="
-            + urllib.parse.quote(sl)
-            + "&tl="
-            + urllib.parse.quote(tl)
-            + "&dt=t&q="
-            + urllib.parse.quote(text.strip())
-        )
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=12) as response:
-            res_json = json.loads(response.read().decode("utf-8"))
-            if res_json and isinstance(res_json, list) and len(res_json) > 0 and res_json[0]:
-                trans = "".join([part[0] for part in res_json[0] if part and part[0]])
-                if trans.strip():
-                    return polish_translated_text(trans.strip())
-    except Exception:
-        pass
-
-    try:
-        from deep_translator import GoogleTranslator
-        src = "auto" if sl == "auto" else sl
-        trans = GoogleTranslator(source=src, target=tl).translate(text.strip())
-        if trans:
-            return polish_translated_text(trans.strip())
-    except Exception:
-        pass
-
-    return text.strip()
+    raise TranslationUnavailableError(
+        "No configured LLM translation provider is available. Configure OpenAI, Groq, or Gemini."
+    )
 
 
 # ==============================================================================
 # LLM-POWERED TRANSLATION
 # ==============================================================================
 
-def _get_llm_client(api_key: Optional[str] = None):
+def _get_llm_client(
+    provider: Optional[str] = None,
+    gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    groq_api_key: Optional[str] = None,
+    model: Optional[str] = None,
+):
     """Safely get the LLM client, returning None if unavailable."""
     try:
         from coherex.llm import get_llm_client
-        return get_llm_client(api_key=api_key)
+        return get_llm_client(
+            provider=provider,
+            gemini_api_key=gemini_api_key,
+            openai_api_key=openai_api_key,
+            groq_api_key=groq_api_key,
+            openai_model=model if provider == "openai" else None,
+            groq_model=model if provider == "groq" else None,
+            gemini_model=model if provider == "gemini" else None,
+        )
     except ImportError:
         return None
 
@@ -151,13 +153,17 @@ def llm_translate_text(
     source_lang: str = "ar",
     target_lang: str = "en",
     context: str = "",
-    api_key: Optional[str] = None,
+    provider: Optional[str] = None,
+    gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    groq_api_key: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Optional[str]:
     """
     Translate a single text using the LLM with dialect awareness.
-    Returns None if LLM is unavailable (caller should fall back to GTX).
+    Returns None if the configured LLM is unavailable.
     """
-    client = _get_llm_client(api_key)
+    client = _get_llm_client(provider, gemini_api_key, openai_api_key, groq_api_key, model)
     if client is None or not client.is_available():
         return None
 
@@ -177,13 +183,17 @@ def llm_translate_batch(
     texts: List[str],
     source_lang: str = "ar",
     target_lang: str = "en",
-    api_key: Optional[str] = None,
+    provider: Optional[str] = None,
+    gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    groq_api_key: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Optional[List[str]]:
     """
     Translate a batch of subtitle segments using the LLM with cross-segment coherence.
-    Returns None if LLM is unavailable (caller should fall back to per-segment GTX).
+    Returns None if the configured LLM is unavailable.
     """
-    client = _get_llm_client(api_key)
+    client = _get_llm_client(provider, gemini_api_key, openai_api_key, groq_api_key, model)
     if client is None or not client.is_available():
         return None
 
@@ -199,7 +209,7 @@ def llm_translate_batch(
 
 
 # ==============================================================================
-# PUBLIC TRANSLATION API (Auto-selects LLM or GTX)
+# PUBLIC TRANSLATION API
 # ==============================================================================
 
 def translate_segments(
@@ -208,13 +218,18 @@ def translate_segments(
     target_lang: str = "en",
     include_original: bool = False,
     use_llm: bool = True,
+    provider: Optional[str] = None,
     gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    groq_api_key: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Translates transcript segments with context awareness and timing preservation.
     
     Attempts LLM batch translation first for cross-segment coherence and dialect
-    awareness, then falls back to per-segment Google GTX translation.
+    awareness. If it is unavailable, translation fails clearly unless an
+    administrator explicitly enabled the legacy public endpoint.
     
     Args:
         segments: List of segment dicts with 'text', 'start', 'end' keys.
@@ -225,7 +240,8 @@ def translate_segments(
         gemini_api_key: Optional explicit API key.
         
     Returns:
-        Deep copy of segments with 'translated_text' and updated 'text' fields.
+        Deep copy of segments with source ``text`` preserved and a separate
+        ``translated_text`` field.
     """
     if not segments:
         return []
@@ -249,22 +265,27 @@ def translate_segments(
                 texts=original_texts,
                 source_lang=source_lang,
                 target_lang=target_lang,
-                api_key=gemini_api_key,
+                provider=provider,
+                gemini_api_key=gemini_api_key,
+                openai_api_key=openai_api_key,
+                groq_api_key=groq_api_key,
+                model=model,
             )
 
-            if llm_results and len(llm_results) == len(original_texts):
+            if llm_results:
+                validate_translation_batch(original_texts, llm_results, target_lang)
                 for seg, trans in zip(translated_segments, llm_results):
-                    seg["translated_text"] = polish_translated_text(trans.strip()) if trans else seg["original_text"]
-                    seg["translation_engine"] = "gemini"
+                    seg["translated_text"] = polish_translated_text(trans.strip())
+                    seg["translation_engine"] = "configured-llm"
                 llm_success = True
                 logger.info(
                     "LLM batch translation completed: %d segments [%s -> %s]",
                     len(original_texts), source_lang, target_lang
                 )
 
-    # Fallback to per-segment GTX translation
+    # A network fallback is permitted only when explicitly enabled.
     if not llm_success:
-        logger.info("Using GTX per-segment translation for %d segments", len(translated_segments))
+        logger.warning("No valid LLM translation completed; refusing to label source text as translated")
         for seg in translated_segments:
             trans_text = raw_neural_translate(
                 seg["original_text"],
@@ -272,14 +293,15 @@ def translate_segments(
                 target_lang=target_lang
             )
             seg["translated_text"] = trans_text
-            seg["translation_engine"] = "gtx"
+            seg["translation_engine"] = "legacy-google-translate"
 
-    # Set the display text
+    # Keep the source transcript immutable. Renderers choose the appropriate track.
     for seg in translated_segments:
-        if include_original:
-            seg["text"] = f"{seg['translated_text']}\n{seg['original_text']}"
-        else:
-            seg["text"] = seg["translated_text"]
+        seg["text"] = seg["original_text"]
+        seg["display_text"] = (
+            f"{seg['translated_text']}\n{seg['original_text']}"
+            if include_original else seg["translated_text"]
+        )
 
     return translated_segments
 
@@ -290,7 +312,11 @@ def translate_result(
     source_lang: Optional[str] = None,
     bilingual: bool = False,
     use_llm: bool = True,
+    provider: Optional[str] = None,
     gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    groq_api_key: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Translates full CohereX result dictionary into target language.
@@ -316,7 +342,11 @@ def translate_result(
             target_lang=target_lang,
             include_original=bilingual,
             use_llm=use_llm,
+            provider=provider,
             gemini_api_key=gemini_api_key,
+            openai_api_key=openai_api_key,
+            groq_api_key=groq_api_key,
+            model=model,
         )
 
     new_result["target_language"] = target_lang

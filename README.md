@@ -7,16 +7,20 @@
 ## 🌟 Key Features
 
 - 🎬 **Dual Output Modes**:
-  - **Broadcast Subtitles Mode**: Generates tightly synchronized, broadcast-standard subtitle cues (1–2 lines, max 38 chars/line, 1.5–5s durations) with zero screen-covering text walls.
-  - **Meeting Notes & Summaries Mode**: Produces structured Executive Overviews, Key Highlights, Speaker-by-Speaker Discussion Minutes, and Topic Timelines.
+  - **Broadcast Subtitles Mode**: Generates non-overlapping cues with enforced line limits and a machine-readable quality report.
+  - **Meeting Notes & Summaries Mode**: Produces an adaptive professional MOM with an executive summary, topic-specific deep dives, grounded decisions, action items, and open questions.
+- 🔑 **API-Backed Intelligence**:
+  - Professional MOM, subtitle translation, and video synopsis support OpenAI, Groq, and Google Gemini.
+  - The provider and model are selected explicitly in the UI or with `LLM_PROVIDER` and the provider-specific model variable.
+  - Intelligence features fail closed when the selected provider has no API key; CohereX never silently spends against a different provider.
 - 🧠 **Intelligent Automatic Model Routing**:
   - **Arabic Media (`ar`)**: Automatically routes to `CohereLabs/cohere-transcribe-arabic-07-2026` (finetuned for Egyptian/Arab dialects, colloquial slang, and rapid dialogue).
   - **Multilingual Media (`en`, `es`, `fr`, etc.)**: Automatically routes to `CohereLabs/cohere-transcribe-03-2026` (14-language base model).
 - 🌍 **Dynamic Contextual Translation**:
-  - Fast, general-purpose neural translation that translates full meaning dynamically rather than literal word-by-word.
+  - Uses the selected OpenAI, Groq, or Gemini model; translation failures are explicit and never mislabeled as success.
   - Supports dual-track **Bilingual Subtitles** (Translated + Original).
 - 👥 **Speaker Diarization & Word Alignment**:
-  - Powered by PyAnnote and wav2vec 2.0 phoneme alignment for millisecond-exact word timing and speaker labels.
+  - Powered by PyAnnote and wav2vec 2.0 forced alignment; unalignable code-switched characters are safely interpolated.
 - 💻 **Dual Interface**:
   - Elegant **Streamlit Web Studio** with live preview and auto-saving.
   - Scriptable **Command-Line Interface (CLI)** for automated workflows.
@@ -27,12 +31,13 @@
 
 ```
 coherevoice-studio/
+├── .env.example                    # Safe provider/API configuration template
 ├── app.py                          # Streamlit Studio Web UI
 ├── run_ui.bat                      # Windows 1-Click Launcher for Web UI
 ├── pyproject.toml                  # Python package configuration
 ├── README.md                       # User Guide & Documentation
 ├── TECHNICAL_ARCHITECTURE.md        # Deep-Dive Technical Reference & Pipeline Docs
-├── .env                            # Environment keys (HF_TOKEN)
+├── environment.yml                # Reproducible Conda environment
 ├── coherex/                        # Core Python Engine Library
 │   ├── __init__.py                 # Lazy export API
 │   ├── asr.py                      # Cohere ASR Model Loader & Transcriber
@@ -42,6 +47,7 @@ coherevoice-studio/
 │   ├── subtitles.py                # Broadcast-Quality Subtitle Splitter (SRT/VTT)
 │   ├── meeting_notes.py            # Meeting Notes & Dialogue Summarizer
 │   ├── translator.py               # Dynamic Neural Subtitle & Transcript Translator
+│   ├── llm/                         # OpenAI, Groq, and Gemini provider clients
 │   └── utils.py                    # Timecode formatters & helpers
 ├── scripts/                        # Standalone CLI tools & Batch Runners
 │   ├── cli_transcribe.py           # Command-Line Subtitle Generator
@@ -57,6 +63,7 @@ coherevoice-studio/
 - Python 3.10+ (Conda recommended)
 - NVIDIA GPU with CUDA support (or CPU mode)
 - [FFmpeg](https://ffmpeg.org/) installed and available on system PATH
+- An OpenAI, Groq, or Gemini API key for translation, video synopsis, and professional MOM generation
 
 ### 2. Setup Environment
 ```bash
@@ -64,18 +71,28 @@ coherevoice-studio/
 git clone https://github.com/omarsalama4/coherevoice-studio.git
 cd coherevoice-studio
 
-# Create and activate environment
-conda create -n coherevoice python=3.11 -y
-conda activate coherevoice
+# Create the tested environment, including FFmpeg
+conda env create -f environment.yml
+conda activate coherex
 
-# Install dependencies and local package
-pip install -e .
+# Verify dependencies and that this checkout is the active package
+python scripts/doctor.py
 ```
 
 ### 3. Authentication
-Create a `.env` file in the root folder with your Hugging Face API key:
+Copy `.env.example` to `.env`, select one provider, and fill its API key. The real `.env` is ignored by Git.
 ```env
 HF_TOKEN=hf_your_huggingface_token_here
+LLM_PROVIDER=openai
+
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-5.6-terra
+
+# Alternative hosted providers:
+# GROQ_API_KEY=gsk_...
+# GROQ_MODEL=openai/gpt-oss-120b
+# GEMINI_API_KEY=...
+# GEMINI_MODEL=gemini-3.8-flash
 ```
 
 ---
@@ -90,7 +107,7 @@ Launch the web studio with one click:
 run_ui.bat
 
 # Or from terminal
-streamlit run app.py
+streamlit run app.py --server.address 127.0.0.1
 ```
 
 #### In the Web UI:
@@ -98,8 +115,9 @@ streamlit run app.py
 2. **Select Mode**:
    - **🎬 Subtitles & Captions**: Generates short, readable subtitle cues with custom line lengths.
    - **📋 Meeting Notes**: Generates an Executive Overview, Speaker Turns, and Action Items.
-3. **Toggle Translation (Optional)**: Choose target language (e.g. English, French, Spanish) and enable Bilingual Mode if desired.
-4. **Click "🚀 Run Pipeline"**: Outputs are automatically saved to `outputs/` and available for download.
+3. **Choose Intelligence Provider and Model**: Select OpenAI, Groq, or Gemini and enter that provider's API key.
+4. **Toggle Translation (Optional)**: Choose target language (e.g. English, French, Spanish) and enable Bilingual Mode if desired.
+5. **Click "🚀 Run Pipeline"**: Outputs are automatically saved to `outputs/` and available for download.
 
 ---
 
@@ -124,7 +142,7 @@ python scripts/cli_meeting_notes.py "C:\path\to\meeting.mp4" --lang ar --transla
 
 ## 📄 Output Files Explained
 
-When processing any file (e.g. `video.mp4`), all output tracks are auto-saved directly to `outputs/`:
+Each run is saved under a unique timestamped directory in `outputs/`, preventing concurrent jobs from overwriting one another.
 
 | File | Type | Description |
 | :--- | :--- | :--- |
@@ -136,6 +154,15 @@ When processing any file (e.g. `video.mp4`), all output tracks are auto-saved di
 | `video_meeting_notes_en.md` | Markdown | English translated Meeting Notes for global teams. |
 | `video_meeting_notes.txt` | Text | Plain-text dialogue minutes with timestamps and speaker labels. |
 | `video.json` | Metadata | Full machine metadata (segment timestamps, confidence scores, speaker tags). |
+| `video_subtitle_qc.json` | Quality report | Structural subtitle errors and reading-speed warnings. |
+| `video_models_used.json` | Provenance | Exact ASR, alignment, diarization, API provider, and LLM model used for the run. |
+
+## Security scope
+
+The bundled UI is a local workstation tool bound to `127.0.0.1`. Do not expose it
+to a network without authentication, TLS, isolation, and request limits. Uploaded
+media is removed from temporary storage after each job; generated outputs remain
+until you delete them. See [SECURITY.md](SECURITY.md).
 
 ---
 

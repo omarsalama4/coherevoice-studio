@@ -14,11 +14,13 @@ from pyannote.core import Segment
 from coherex.diarize import Segment as SegmentX
 from coherex.vads.vad import Vad
 from coherex.log_utils import get_logger
+from coherex.security import harden_lightning_checkpoint_loading
 
 logger = get_logger(__name__)
 
 
 def load_vad_model(device, vad_onset=0.500, vad_offset=0.363, token=None, model_fp=None):
+    harden_lightning_checkpoint_loading()
     model_dir = torch.hub._get_torch_home()
 
     main_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

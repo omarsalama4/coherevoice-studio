@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import argparse
+import uuid
 from pathlib import Path
 
 # Ensure root is in path
@@ -38,7 +39,6 @@ def main():
     parser.add_argument("--max-chars", type=int, default=38, help="Max characters per subtitle line (default: 38)")
     parser.add_argument("--max-lines", type=int, default=2, help="Max lines per subtitle cue (default: 2)")
     parser.add_argument("--batch-size", type=int, default=8, help="ASR batch size")
-
     args = parser.parse_args()
 
     media_path = Path(args.media_file).resolve()
@@ -60,8 +60,12 @@ def main():
     print(f"🧠 Selected Model: {model_id} (Language: {args.lang})")
 
     # Step 1: Extract audio if video
-    audio_path = extract_audio_from_video(media_path)
-    audio_array = coherex.load_audio(str(audio_path))
+    temp_audio = out_dir / f".{stem_name}.{uuid.uuid4().hex}.wav"
+    audio_path = extract_audio_from_video(media_path, output_path=temp_audio)
+    try:
+        audio_array = coherex.load_audio(str(audio_path))
+    finally:
+        Path(audio_path).unlink(missing_ok=True)
 
     # Step 2: Transcribe
     print("🎙️ Transcribing speech...")
@@ -69,14 +73,20 @@ def main():
         model_name=model_id,
         device="cuda" if torch.cuda.is_available() else "cpu",
         batch_size=args.batch_size,
-        language=(None if args.lang == "auto" else args.lang)
+        language=None if args.lang == "auto" else args.lang,
     )
-    result = model.transcribe(audio_array, batch_size=args.batch_size)
-    detected_lang = result.get("language", args.lang)
+    detected_lang = coherex.detect_language(model, audio_array) if args.lang == "auto" else args.lang
+    result = model.transcribe(audio_array, language=detected_lang, batch_size=args.batch_size)
 
     # Step 3: Translation (Optional)
     if args.translate:
         print(f"🌍 Translating subtitles into [{args.translate.upper()}]...")
+        translated_result = translate_result(
+            result,
+            target_lang=args.translate,
+            source_lang=detected_lang,
+            bilingual=args.bilingual,
+        )
     # Create dedicated subfolder per media file
     run_dir = out_dir / stem_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -90,12 +100,13 @@ def main():
     (run_dir / f"{stem_name}_{detected_lang}.vtt").write_text(export_vtt(cues_orig), encoding="utf-8")
 
     if args.translate:
-        cues_trans = generate_subtitles_from_segments(segments, args.max_chars, args.max_lines, use_translated=True)
+        translated_segments = translated_result.get("segments", [])
+        cues_trans = generate_subtitles_from_segments(translated_segments, args.max_chars, args.max_lines, use_translated=True)
         (run_dir / f"{stem_name}_{args.translate}.srt").write_text(export_srt(cues_trans), encoding="utf-8")
         (run_dir / f"{stem_name}_{args.translate}.vtt").write_text(export_vtt(cues_trans), encoding="utf-8")
 
         if args.bilingual:
-            cues_bi = generate_subtitles_from_segments(segments, args.max_chars, args.max_lines, use_translated=True, bilingual=True)
+            cues_bi = generate_subtitles_from_segments(translated_segments, args.max_chars, args.max_lines, use_translated=True, bilingual=True)
             (run_dir / f"{stem_name}_bilingual.srt").write_text(export_srt(cues_bi), encoding="utf-8")
 
     # Step 5: Save JSON

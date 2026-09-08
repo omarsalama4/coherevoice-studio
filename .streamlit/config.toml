@@ -1,7 +1,8 @@
 [server]
-maxUploadSize = 50000
-enableCORS = false
-enableXsrfProtection = false
+address = "127.0.0.1"
+maxUploadSize = 2048
+enableCORS = true
+enableXsrfProtection = true
 
 [theme]
 base = "dark"

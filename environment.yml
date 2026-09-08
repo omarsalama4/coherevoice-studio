@@ -1,0 +1,10 @@
+name: coherex
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - ffmpeg
+  - pip
+  - pip:
+      - -c constraints-tested.txt
+      - -e .[dev,langid]

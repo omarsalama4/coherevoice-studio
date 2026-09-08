@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import os
 from pyannote.audio import Pipeline
 from typing import Optional, Union, List, Tuple
 import torch
@@ -7,16 +8,22 @@ import torch
 from coherex.audio import load_audio, SAMPLE_RATE
 from coherex.schema import TranscriptionResult, AlignedTranscriptionResult, ProgressCallback
 from coherex.log_utils import get_logger
+from coherex.security import harden_lightning_checkpoint_loading
 
 logger = get_logger(__name__)
+
+TRUSTED_DIARIZATION_MODELS = {
+    "pyannote/speaker-diarization-community-1",
+    "pyannote/speaker-diarization-3.1",
+}
 
 
 class IntervalTree:
     """
     Simple interval tree for fast overlap queries using sorted array + binary search.
 
-    Uses O(n) space and provides O(log n) query time instead of O(n) linear scan.
-    This achieves ~228x speedup for speaker assignment in long-form content.
+    Uses sorted starts plus prefix maximum ends to exclude non-overlapping
+    prefixes in logarithmic time. Query cost is O(log n + candidates).
     """
 
     def __init__(self, intervals: List[Tuple[float, float, str]]):
@@ -29,6 +36,8 @@ class IntervalTree:
         if not intervals:
             self.starts = np.array([])
             self.ends = np.array([])
+            self.prefix_max_ends = np.array([])
+            self.prefix_max_indices = np.array([], dtype=np.int64)
             self.speakers: List[str] = []
             return
 
@@ -36,6 +45,14 @@ class IntervalTree:
         sorted_intervals = sorted(intervals, key=lambda x: x[0])
         self.starts = np.array([i[0] for i in sorted_intervals], dtype=np.float64)
         self.ends = np.array([i[1] for i in sorted_intervals], dtype=np.float64)
+        self.prefix_max_ends = np.maximum.accumulate(self.ends)
+        max_index = 0
+        prefix_indices = []
+        for index, value in enumerate(self.ends):
+            if value > self.ends[max_index]:
+                max_index = index
+            prefix_indices.append(max_index)
+        self.prefix_max_indices = np.asarray(prefix_indices, dtype=np.int64)
         self.speakers = [i[2] for i in sorted_intervals]
 
     def query(self, start: float, end: float) -> List[Tuple[str, float]]:
@@ -58,12 +75,13 @@ class IntervalTree:
         if right_idx == 0:
             return []
 
-        # Check candidates for actual overlap
-        candidates = slice(0, right_idx)
+        # Discard the prefix for which every interval ends at/before the query.
+        left_idx = np.searchsorted(self.prefix_max_ends[:right_idx], start, side='right')
+        candidates = slice(left_idx, right_idx)
         overlaps = (self.starts[candidates] < end) & (self.ends[candidates] > start)
 
         results = []
-        for idx in np.where(overlaps)[0]:
+        for idx in np.where(overlaps)[0] + left_idx:
             intersection = min(self.ends[idx], end) - max(self.starts[idx], start)
             if intersection > 0:
                 results.append((self.speakers[idx], intersection))
@@ -82,9 +100,16 @@ class IntervalTree:
         if len(self.starts) == 0:
             return None
 
-        # Calculate midpoints of all segments
-        mids = (self.starts + self.ends) / 2
-        nearest_idx = np.argmin(np.abs(mids - time))
+        insertion = int(np.searchsorted(self.starts, time, side="left"))
+        candidates = []
+        if insertion < len(self.starts):
+            candidates.append(insertion)
+        if insertion > 0:
+            candidates.append(int(self.prefix_max_indices[insertion - 1]))
+        nearest_idx = min(
+            candidates,
+            key=lambda idx: max(self.starts[idx] - time, time - self.ends[idx], 0.0),
+        )
         return self.speakers[nearest_idx]
 
 
@@ -98,6 +123,16 @@ class DiarizationPipeline:
         cache_dir=None,
         **kwargs,
     ):
+        harden_lightning_checkpoint_loading()
+        if (
+            model_name
+            and model_name not in TRUSTED_DIARIZATION_MODELS
+            and os.getenv("COHEREX_ALLOW_CUSTOM_MODELS", "").lower() not in {"1", "true", "yes"}
+        ):
+            raise ValueError(
+                f"Untrusted diarization model {model_name!r}. Set "
+                "COHEREX_ALLOW_CUSTOM_MODELS=true only after reviewing its artifacts."
+            )
         if isinstance(device, str):
             device = torch.device(device)
 
@@ -130,6 +165,7 @@ class DiarizationPipeline:
                 logger.info(f"Loading diarization model candidate: {cand}")
                 loaded_pipe = Pipeline.from_pretrained(cand, token=auth_token, cache_dir=cache_dir)
                 if loaded_pipe is not None:
+                    self.model_name = cand
                     break
             except Exception as e:
                 last_err = e
@@ -224,13 +260,13 @@ def assign_word_speakers(
     diarize_df: pd.DataFrame,
     transcript_result: Union[AlignedTranscriptionResult, TranscriptionResult],
     speaker_embeddings: Optional[dict[str, list[float]]] = None,
-    fill_nearest: bool = True,
+    fill_nearest: bool = False,
 ) -> Union[AlignedTranscriptionResult, TranscriptionResult]:
     """
     Assign speakers to words and segments in the transcript.
 
-    Uses an interval tree for O(log n) overlap queries instead of O(n) linear scan,
-    achieving ~228x speedup for long-form content (3+ hour podcasts).
+    Uses indexed overlap queries and leaves non-overlapping speech unlabeled by
+    default, avoiding fabricated speaker assignments across diarization gaps.
 
     Args:
         diarize_df: Diarization dataframe from DiarizationPipeline
@@ -245,7 +281,7 @@ def assign_word_speakers(
     if not transcript_segments or diarize_df is None or len(diarize_df) == 0:
         return transcript_result
 
-    # Build interval tree from diarization segments for O(log n) queries
+    # Build the indexed interval collection once for all assignments.
     intervals = [
         (row['start'], row['end'], row['speaker'])
         for _, row in diarize_df.iterrows()

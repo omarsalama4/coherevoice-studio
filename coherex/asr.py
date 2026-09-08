@@ -263,13 +263,25 @@ def load_model(
             local_files_only=local_files_only,
             token=use_auth_token,
         )
+        model_kwargs = {
+            "torch_dtype": dtype,
+            "cache_dir": download_root,
+            "local_files_only": local_files_only,
+            "token": use_auth_token,
+            "low_cpu_mem_usage": True,
+        }
+        if device == "cuda":
+            # Materialize cached weights directly on the selected GPU. Loading
+            # the 2B model on CPU and calling .to(cuda) afterwards can trigger
+            # heavy Windows paging and appear to hang on memory-constrained PCs.
+            model_kwargs["device_map"] = {"": target_device}
+
         model = CohereAsrForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=dtype,
-            cache_dir=download_root,
-            local_files_only=local_files_only,
-            token=use_auth_token,
-        ).to(target_device)
+            **model_kwargs,
+        )
+        if device != "cuda":
+            model = model.to(target_device)
         model.eval()
     else:
         raise ValueError(f"Invalid backend: {backend!r}. Choose 'local' or 'vllm'.")

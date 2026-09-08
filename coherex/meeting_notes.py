@@ -2,12 +2,9 @@
 """
 Professional Meeting Notes & Transcript Summarizer for CohereVoice Studio.
 
-Two generation modes:
-1. LLM-Powered (Gemini): Structured MOM with executive summary, decisions,
-   action items, topics, and open questions — powered by Google Gemini 2.0 Flash.
-2. Heuristic Fallback: Rule-based extraction when no LLM is available.
-
-The module auto-detects LLM availability and falls back gracefully.
+Primary generation uses an API-backed LLM for structured MOM with executive
+summary, decisions, action items, topics, and open questions. A legacy heuristic
+renderer remains available only through explicit opt-in.
 """
 
 import re
@@ -15,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-from coherex.translator import raw_neural_translate, clean_asr_repetitions
+from coherex.translator import clean_asr_repetitions
 
 logger = logging.getLogger("coherex.meeting_notes")
 
@@ -25,14 +22,12 @@ logger = logging.getLogger("coherex.meeting_notes")
 # ==============================================================================
 
 def format_short_time(seconds: float) -> str:
-    """Formats seconds into MM:SS or HH:MM:SS."""
+    """Format all evidence references as canonical HH:MM:SS."""
     seconds = max(0.0, float(seconds))
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
-    if hrs > 0:
-        return f"{hrs:02d}:{mins:02d}:{secs:02d}"
-    return f"{mins:02d}:{secs:02d}"
+    return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
 
 def normalize_speaker_name(speaker_tag: Optional[str]) -> str:
@@ -72,9 +67,11 @@ def group_speaker_dialogue(
 
         if use_translated:
             if not trans_text and orig_text:
-                # Dynamically translate if missing
-                trans_text = raw_neural_translate(orig_text, source_lang="ar", target_lang=target_lang)
-            text = trans_text or orig_text
+                raise RuntimeError(
+                    "Translated meeting-note input is missing translated_text; "
+                    "translate the result with a configured LLM first."
+                )
+            text = trans_text
         else:
             text = orig_text
 
@@ -184,11 +181,79 @@ def _format_mom_as_markdown(mom) -> str:
     return "\n".join(md)
 
 
+def _evidence_timestamps(segments: List[Dict[str, Any]]) -> set[str]:
+    """Return the exact turn-start timestamps the model may cite as evidence."""
+    return {
+        format_short_time(turn["start"])
+        for turn in group_speaker_dialogue(segments, use_translated=False)
+    }
+
+
+def _validate_structured_evidence(mom, allowed: set[str]) -> None:
+    for kind, entries in (("decision", mom.decisions), ("action item", mom.action_items)):
+        for entry in entries:
+            timestamp = str(entry.timestamp).strip().strip("[]`")
+            if timestamp not in allowed:
+                raise ValueError(f"Ungrounded {kind} timestamp returned by LLM: {timestamp}")
+
+
+def _validate_markdown_evidence(markdown: str, allowed: set[str]) -> None:
+    required = ("Executive Summary", "Decisions", "Action Items", "Open Questions")
+    missing = [heading for heading in required if heading.lower() not in markdown.lower()]
+    if missing:
+        raise ValueError("LLM meeting notes omitted required sections: " + ", ".join(missing))
+
+    headings = re.findall(r"^##\s+(.+)$", markdown, flags=re.MULTILINE)
+    core_terms = ("meeting overview", "executive summary", "decisions", "action items", "open questions")
+    adaptive_headings = [
+        heading for heading in headings
+        if not any(term in heading.lower() for term in core_terms)
+    ]
+    if len(adaptive_headings) < 2:
+        raise ValueError("LLM meeting notes omitted substantive adaptive deep-dive sections")
+    for timestamp in re.findall(r"\[(\d{2}:\d{2}:\d{2})\]", markdown):
+        if timestamp not in allowed:
+            raise ValueError(f"LLM returned an ungrounded evidence timestamp: {timestamp}")
+
+    # Decisions and actions are the highest-risk sections for fabricated facts.
+    # Require evidence in each unless the model explicitly reports that none
+    # were identified. Merely validating timestamps that happen to be present
+    # allowed an uncited hallucinated section to pass.
+    for heading, next_heading in (
+        ("Decisions", "Action Items"),
+        ("Action Items", "Open Questions"),
+    ):
+        section_match = re.search(
+            rf"^##[^\n]*{re.escape(heading)}[^\n]*\n(.*?)(?=^##\s|\Z)",
+            markdown,
+            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+        if not section_match:
+            raise ValueError(f"LLM meeting notes omitted the {heading} section")
+        section = section_match.group(1).strip()
+        says_none = bool(
+            re.search(
+                r"\b(?:none|not identified|n/?a|no\s+(?:(?:final|formal|confirmed|explicit)\s+)?"
+                r"(?:decisions?|actions?|action items?|commitments?))\b",
+                section,
+                re.I,
+            )
+        )
+        citations = re.findall(r"\[(\d{2}:\d{2}:\d{2})\]", section)
+        if section and not says_none and not citations:
+            raise ValueError(f"LLM {heading} section contains claims without evidence timestamps")
+
+
 def generate_llm_meeting_notes(
     result: Dict[str, Any],
     title: str = "Meeting Notes",
+    provider: Optional[str] = None,
     gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    groq_api_key: Optional[str] = None,
+    model: Optional[str] = None,
     meeting_date: Optional[str] = None,
+    fail_closed: bool = False,
 ) -> Optional[str]:
     """
     Generate professional Meeting Minutes using the integrated LLM.
@@ -204,8 +269,18 @@ def generate_llm_meeting_notes(
     """
     try:
         from coherex.llm import get_llm_client
-        client = get_llm_client(api_key=gemini_api_key)
+        client = get_llm_client(
+            provider=provider,
+            gemini_api_key=gemini_api_key,
+            openai_api_key=openai_api_key,
+            groq_api_key=groq_api_key,
+            openai_model=model if provider == "openai" else None,
+            groq_model=model if provider == "groq" else None,
+            gemini_model=model if provider == "gemini" else None,
+        )
         if client is None or not client.is_available():
+            if fail_closed:
+                raise RuntimeError("Required LLM API provider is unavailable")
             logger.info("LLM not available — returning None for heuristic fallback")
             return None
     except ImportError:
@@ -218,6 +293,7 @@ def generate_llm_meeting_notes(
 
     # Format transcript for LLM
     transcript_text = _format_transcript_for_llm(segments)
+    allowed_timestamps = _evidence_timestamps(segments)
 
     # Determine meeting metadata
     if not meeting_date:
@@ -243,6 +319,7 @@ def generate_llm_meeting_notes(
                 num_speakers=num_speakers,
                 source_language=lang_name,
             )
+            _validate_markdown_evidence(markdown, allowed_timestamps)
         else:
             mom = client.generate_mom(
                 transcript=transcript_text,
@@ -251,11 +328,14 @@ def generate_llm_meeting_notes(
                 num_speakers=num_speakers,
                 source_language=lang_name,
             )
+            _validate_structured_evidence(mom, allowed_timestamps)
             markdown = _format_mom_as_markdown(mom)
         logger.info("AI MOM generated successfully (%d chars)", len(markdown))
         return markdown
 
     except Exception as e:
+        if fail_closed:
+            raise RuntimeError(f"Required LLM MOM generation failed validation: {e}") from e
         logger.error("LLM MOM generation failed: %s — falling back to heuristic", e)
         return None
 
@@ -355,14 +435,19 @@ def generate_meeting_notes_markdown(
     title: str = "Meeting & Conversation Notes",
     use_translated: bool = False,
     target_lang: str = "en",
+    provider: Optional[str] = None,
     gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    groq_api_key: Optional[str] = None,
+    model: Optional[str] = None,
     meeting_date: Optional[str] = None,
     use_llm: bool = True,
+    allow_heuristic_fallback: bool = False,
 ) -> str:
     """
     Generates professional Meeting Notes from transcription results.
     
-    Automatically attempts LLM-powered generation first, then falls back to heuristic.
+    Uses an API-backed LLM and fails closed by default if no provider is configured.
     
     Args:
         result: Full transcription result dict with segments.
@@ -371,7 +456,8 @@ def generate_meeting_notes_markdown(
         target_lang: Target language for translation.
         gemini_api_key: Optional explicit Gemini API key.
         meeting_date: Meeting date as YYYY-MM-DD.
-        use_llm: Whether to attempt LLM generation (set False to force heuristic).
+        use_llm: Whether to attempt LLM generation.
+        allow_heuristic_fallback: Explicit opt-in for non-AI legacy output.
         
     Returns:
         Professional Markdown meeting notes string.
@@ -381,11 +467,19 @@ def generate_meeting_notes_markdown(
         llm_result = generate_llm_meeting_notes(
             result=result,
             title=title,
+            provider=provider,
             gemini_api_key=gemini_api_key,
+            openai_api_key=openai_api_key,
+            groq_api_key=groq_api_key,
+            model=model,
             meeting_date=meeting_date,
+            fail_closed=not allow_heuristic_fallback,
         )
         if llm_result is not None:
             return llm_result
+
+    if not allow_heuristic_fallback:
+        raise RuntimeError("MOM generation failed and heuristic fallback is disabled")
 
     # Fallback to heuristic generation
     logger.info("Using heuristic meeting notes generation")

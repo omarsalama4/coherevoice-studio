@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenAI & OpenAI-Compatible LLM Client for CohereX.
-Supports OpenAI (GPT-4o, GPT-4o-mini), Groq, OpenRouter, vLLM, LocalAI, and any OpenAI-compatible API.
+OpenAI and hosted OpenAI-compatible LLM client for CohereX.
 """
 
 import os
@@ -17,13 +16,13 @@ from coherex.llm.schemas import MeetingMinutes, ActionItem, Decision, TopicDiscu
 
 logger = logging.getLogger("coherex.llm.openai")
 
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-terra")
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 class OpenAIClient(LLMClient):
     """
-    Client for OpenAI and OpenAI-compatible endpoints (Groq, OpenRouter, vLLM).
+    Client for OpenAI and hosted OpenAI-compatible endpoints.
     Uses standard HTTP/JSON requests with resilient error handling.
     """
 
@@ -36,6 +35,7 @@ class OpenAIClient(LLMClient):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.model = model or os.environ.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)).rstrip("/")
+        self.provider_name = "openai" if self.base_url == DEFAULT_OPENAI_BASE_URL else "openai-compatible"
 
     def is_available(self) -> bool:
         """Check if API key is present."""
@@ -48,21 +48,36 @@ class OpenAIClient(LLMClient):
         max_tokens: int = 4096,
         json_mode: bool = False,
     ) -> str:
-        """Send chat completion request to OpenAI-compatible endpoint."""
-        url = f"{self.base_url}/chat/completions"
+        """Send a Responses API request to OpenAI, or Chat Completions to compatible endpoints."""
+        is_official_openai = self.base_url.rstrip("/") == DEFAULT_OPENAI_BASE_URL
+        url = f"{self.base_url}/responses" if is_official_openai else f"{self.base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
 
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+        if is_official_openai:
+            instructions = "\n\n".join(
+                message["content"] for message in messages if message.get("role") == "system"
+            )
+            input_messages = [message for message in messages if message.get("role") != "system"]
+            payload: Dict[str, Any] = {
+                "model": self.model,
+                "input": input_messages,
+                "max_output_tokens": max_tokens,
+                "store": False,
+            }
+            if instructions:
+                payload["instructions"] = instructions
+        else:
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
 
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers)
@@ -70,10 +85,20 @@ class OpenAIClient(LLMClient):
         try:
             with urllib.request.urlopen(req, timeout=120) as response:
                 res = json.loads(response.read().decode("utf-8"))
+                if is_official_openai:
+                    if isinstance(res.get("output_text"), str):
+                        return res["output_text"].strip()
+                    text_parts = []
+                    for item in res.get("output", []):
+                        for content in item.get("content", []):
+                            if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                                text_parts.append(content["text"])
+                    result_text = "\n".join(text_parts).strip()
+                    if not result_text:
+                        raise RuntimeError("OpenAI Responses API returned no output text")
+                    return result_text
                 choices = res.get("choices", [])
-                if choices:
-                    return choices[0].get("message", {}).get("content", "").strip()
-                return ""
+                return choices[0].get("message", {}).get("content", "").strip() if choices else ""
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
             logger.error("OpenAI API HTTPError %d: %s", e.code, err_body)
@@ -190,15 +215,16 @@ class OpenAIClient(LLMClient):
                     temperature=0.2,
                     json_mode=True,
                 )
-                data = json.loads(response)
+                cleaned_response = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.strip(), flags=re.IGNORECASE)
+                data = json.loads(cleaned_response)
                 translations = data.get("translations", [])
                 if isinstance(translations, list) and len(translations) == len(chunk):
                     all_translations.extend(translations)
                 else:
-                    all_translations.extend(chunk)
+                    raise RuntimeError("OpenAI returned the wrong number of subtitle translations")
             except Exception as e:
                 logger.warning("OpenAI batch translation chunk failed: %s", e)
-                all_translations.extend(chunk)
+                raise RuntimeError("OpenAI batch translation failed") from e
 
         return all_translations
 

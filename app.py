@@ -3,12 +3,8 @@
 CohereX Studio - Production UI for ASR Transcription, Subtitles & Meeting Intelligence
 Features:
 - Dual Modes: 🎬 Professional Subtitles & Video Synopsis vs 📋 Adaptive Meeting Minutes (MOM)
-- Multi-Engine LLM Intelligence:
-    1. 🖥️ Local Open-Source LLM (Ollama: Qwen 2.5 / DeepSeek) — 100% Offline GPU Processing
-    2. 🤖 OpenAI API (GPT-4o, GPT-4o-mini, Groq, vLLM)
-    3. ☁️ Google Gemini API (Gemini 2.0 Flash)
-    4. ⚡ Heuristic Rule-Based Fallback
-- Automatic Ollama background management & one-click start
+- API-backed LLM intelligence through OpenAI, Groq, or Google Gemini
+- Fail-closed AI translation, synopsis, and MOM generation when no API is configured
 - Auto-detected speaker diarization for broadcast subtitles and conversations
 - Fast cached rendering (zero UI lag on widget clicks)
 """
@@ -19,7 +15,9 @@ import time
 import json
 import shutil
 import tempfile
-import traceback
+import logging
+import re
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -77,9 +75,8 @@ import coherex
 from coherex.utils import format_timestamp
 from coherex.extract_audio import extract_audio_from_video, get_media_info
 from coherex.translator import translate_result, POPULAR_LANGUAGES
-from coherex.subtitles import generate_subtitles_from_segments, export_srt, export_vtt
+from coherex.subtitles import generate_subtitles_from_segments, export_srt, export_vtt, validate_subtitle_cues
 from coherex.meeting_notes import generate_meeting_notes_markdown, group_speaker_dialogue
-from coherex.llm.ollama_client import ensure_ollama_running
 
 # ==============================================================================
 # STREAMLIT PAGE CONFIGURATION & CUSTOM STYLES
@@ -93,8 +90,6 @@ st.set_page_config(
 
 CUSTOM_CSS = """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
     html, body, [class*="css"] {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
@@ -239,19 +234,9 @@ st.markdown(
 )
 
 
-# ==============================================================================
-# FAST CACHED BACKEND RESOLVER (Eliminates UI freezing)
-# ==============================================================================
-@st.cache_data(ttl=25)
-def get_cached_backend_status(gemini_k: str, openai_k: str) -> Dict[str, Any]:
-    """Cached non-blocking check of local Ollama, OpenAI, and Gemini backends."""
-    from coherex.llm import get_llm_backend_info
-    return get_llm_backend_info(gemini_api_key=gemini_k, openai_api_key=openai_k)
-
-
 # Model caching
 @st.cache_resource(show_spinner="Loading Cohere ASR model into VRAM...")
-def get_cohere_model(model_name: str, language_code: Optional[str] = None, batch_size: int = 8):
+def get_cohere_model(model_name: str):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     device_index = 0 if device == "cuda" else 0
     compute_type = "float16" if device == "cuda" else "float32"
@@ -261,11 +246,8 @@ def get_cohere_model(model_name: str, language_code: Optional[str] = None, batch
         "device": device,
         "device_index": device_index,
         "compute_type": compute_type,
-        "batch_size": batch_size,
+        "batch_size": 8,
     }
-    if language_code and language_code != "auto":
-        asr_kwargs["language"] = language_code
-
     return coherex.load_model(**asr_kwargs)
 
 
@@ -347,89 +329,101 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🧠 LLM Intelligence Engine")
 
-    # Keys from env
+    # Provider configuration from environment
     env_gemini = get_env_val(["GEMINI_API_KEY", "gemini_key", "google_api_key"])
     env_openai = get_env_val(["OPENAI_API_KEY", "openai_key"])
-    env_openai_model = get_env_val(["OPENAI_MODEL"], "gpt-4o-mini")
+    env_groq = get_env_val(["GROQ_API_KEY"])
+    env_provider = get_env_val(["LLM_PROVIDER"], "openai").strip().lower()
+    env_openai_model = get_env_val(["OPENAI_MODEL"], "gpt-5.6-terra")
+    env_groq_model = get_env_val(["GROQ_MODEL"], "openai/gpt-oss-120b")
+    env_gemini_model = get_env_val(["GEMINI_MODEL"], "gemini-3.8-flash")
 
-    backend_info = get_cached_backend_status(env_gemini, env_openai)
+    provider_labels = {"OpenAI": "openai", "Groq": "groq", "Google Gemini": "gemini"}
+    provider_names = list(provider_labels)
+    provider_default = next(
+        (label for label, value in provider_labels.items() if value == env_provider),
+        "OpenAI",
+    )
+    selected_provider_label = st.selectbox(
+        "Intelligence Provider",
+        provider_names,
+        index=provider_names.index(provider_default),
+        help="The selected provider is used exclusively; CohereX never silently switches paid providers.",
+    )
+    selected_provider = provider_labels[selected_provider_label]
+    os.environ["LLM_PROVIDER"] = selected_provider
 
-    # Active status badge
-    if backend_info["has_local"]:
+    model_catalog = {
+        "openai": ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra", "gpt-5.4-mini"],
+        "groq": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+        "gemini": ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"],
+    }
+    env_models = {
+        "openai": env_openai_model,
+        "groq": env_groq_model,
+        "gemini": env_gemini_model,
+    }
+    model_options = [*model_catalog[selected_provider], "Custom"]
+    configured_model = env_models[selected_provider]
+    model_default_index = (
+        model_options.index(configured_model)
+        if configured_model in model_options
+        else len(model_options) - 1
+    )
+    selected_model = st.selectbox(
+        f"{selected_provider_label} Model",
+        model_options,
+        index=model_default_index,
+    )
+    if selected_model == "Custom":
+        selected_model = st.text_input(
+            f"Custom {selected_provider_label} model ID",
+            value=configured_model,
+        ).strip()
+
+    provider_model_env = {
+        "openai": "OPENAI_MODEL",
+        "groq": "GROQ_MODEL",
+        "gemini": "GEMINI_MODEL",
+    }
+    if selected_model:
+        os.environ[provider_model_env[selected_provider]] = selected_model
+
+    has_any_api_key = bool(env_openai or env_groq or env_gemini)
+    with st.expander("🔑 Provider API Keys", expanded=not has_any_api_key):
+        default_hf = get_env_val(["HF_TOKEN", "hf_key", "hf_token"])
+        hf_token = st.text_input("Hugging Face Token", value=default_hf, type="password")
+        openai_key_input = st.text_input("OpenAI API Key", value=env_openai, type="password")
+        groq_key_input = st.text_input("Groq API Key", value=env_groq, type="password")
+        gemini_key_input = st.text_input("Gemini API Key", value=env_gemini, type="password")
+
+        for env_name, value in (
+            ("HF_TOKEN", hf_token),
+            ("OPENAI_API_KEY", openai_key_input),
+            ("GROQ_API_KEY", groq_key_input),
+            ("GEMINI_API_KEY", gemini_key_input),
+        ):
+            if value:
+                os.environ[env_name] = value
+
+    provider_keys = {
+        "openai": openai_key_input,
+        "groq": groq_key_input,
+        "gemini": gemini_key_input,
+    }
+    selected_key = provider_keys[selected_provider]
+    llm_available = bool(selected_key and len(selected_key.strip()) > 5 and selected_model)
+    if llm_available:
         st.markdown(
-            f'<span class="status-pill pill-green">🟢 Local LLM: {backend_info["local_model"]}</span>',
-            unsafe_allow_html=True
-        )
-        st.caption("🔒 100% Offline GPU Processing — Zero API cost or data transfer.")
-    elif backend_info["has_openai"]:
-        st.markdown(
-            f'<span class="status-pill pill-blue">🤖 Cloud: OpenAI ({backend_info["openai_model"]})</span>',
-            unsafe_allow_html=True
-        )
-    elif backend_info["has_gemini"]:
-        st.markdown(
-            '<span class="status-pill pill-purple">☁️ Cloud: Google Gemini 2.0</span>',
-            unsafe_allow_html=True
+            f'<span class="status-pill pill-blue">☁️ {selected_provider_label}: {selected_model}</span>',
+            unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            '<span class="status-pill pill-yellow">⚡ No LLM — Heuristic Mode</span>',
-            unsafe_allow_html=True
+            f'<span class="status-pill pill-yellow">🔑 {selected_provider_label} API key required</span>',
+            unsafe_allow_html=True,
         )
-        st.caption("Start Ollama or add an OpenAI/Gemini API key below.")
-        if st.button("🚀 Auto-Start Local Ollama", use_container_width=True):
-            with st.spinner("Starting Ollama server in background..."):
-                ok = ensure_ollama_running(timeout_secs=6)
-                if ok:
-                    st.success("✅ Ollama started!")
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error("Could not auto-start Ollama. Please check if Ollama is installed.")
-
-    # Model selector if multiple local models exist
-    if backend_info["has_local"] and len(backend_info["installed_models"]) > 1:
-        from coherex.llm import get_local_llm_client
-        loc_client = get_local_llm_client()
-        cur_m = backend_info["local_model"]
-        chosen_m = st.selectbox(
-            "Local Model",
-            backend_info["installed_models"],
-            index=backend_info["installed_models"].index(cur_m) if cur_m in backend_info["installed_models"] else 0
-        )
-        if loc_client:
-            loc_client.set_model(chosen_m)
-
-    # Collapsible API Settings
-    with st.expander("🔑 Cloud & API Credentials", expanded=False):
-        default_hf = get_env_val(["HF_TOKEN", "hf_key", "hf_token"])
-        hf_token = st.text_input("Hugging Face Token", value=default_hf, type="password")
-        if hf_token:
-            os.environ["HF_TOKEN"] = hf_token
-
-        st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-        openai_key_input = st.text_input("OpenAI API Key (Optional)", value=env_openai, type="password")
-        if openai_key_input:
-            os.environ["OPENAI_API_KEY"] = openai_key_input
-
-        openai_model_input = st.selectbox(
-            "OpenAI Model",
-            ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "custom"],
-            index=0
-        )
-        if openai_model_input != "custom":
-            os.environ["OPENAI_MODEL"] = openai_model_input
-
-        st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-        gemini_key_input = st.text_input("Gemini API Key (Optional)", value=env_gemini, type="password")
-        if gemini_key_input:
-            os.environ["GEMINI_API_KEY"] = gemini_key_input
-
-        if st.button("🔄 Refresh Engines", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-
-    llm_available = backend_info["any_available"]
+        st.caption("Translation, video synopsis, and MOM generation fail closed until the selected provider is configured.")
 
     st.markdown("---")
     st.caption(f"📁 **Auto-Save Folder:**\n`{OUTPUTS_DIR}`")
@@ -446,6 +440,8 @@ with st.sidebar:
 # MAIN PAGE: 1. MEDIA INPUT & 2. PIPELINE MODE
 # ==============================================================================
 col_left, col_right = st.columns([1, 1], gap="medium")
+upload_temp_dir: Optional[Path] = None
+uploaded_media = None
 
 with col_left:
     with st.container(border=True):
@@ -461,24 +457,21 @@ with col_left:
                 type=["mp4", "mkv", "avi", "mov", "webm", "mp3", "wav", "m4a", "flac", "ogg", "aac"]
             )
             if uploaded_file is not None:
-                media_display_name = uploaded_file.name
-                temp_dir = Path(tempfile.gettempdir()) / "coherex_uploads"
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                temp_media_path = temp_dir / uploaded_file.name
-                with open(temp_media_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                media_path = str(temp_media_path)
+                media_display_name = Path(uploaded_file.name).name
+                uploaded_media = uploaded_file
+                media_path = "__pending_upload__"
                 st.success(f"✅ Loaded: `{uploaded_file.name}` ({uploaded_file.size / (1024*1024):.1f} MB)")
         else:
-            default_path = r"C:\Users\omars\Downloads\WhatsApp Audio 2026-09-05 at 4.54.20 PM.mp4"
-            local_path_str = st.text_input("Enter exact file path on your computer:", value=default_path)
-            if local_path_str and Path(local_path_str).exists():
-                media_path = local_path_str
-                media_display_name = Path(local_path_str).name
-                size_mb = Path(local_path_str).stat().st_size / (1024 * 1024)
+            local_path_str = st.text_input("Enter exact file path on your computer:", value="")
+            local_candidate = Path(local_path_str).expanduser() if local_path_str else None
+            allowed_extensions = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
+            if local_candidate and local_candidate.is_file() and local_candidate.suffix.lower() in allowed_extensions:
+                media_path = str(local_candidate.resolve(strict=True))
+                media_display_name = local_candidate.name
+                size_mb = local_candidate.stat().st_size / (1024 * 1024)
                 st.success(f"✅ Found: `{media_display_name}` ({size_mb:.1f} MB)")
             elif local_path_str:
-                st.error("❌ File not found. Please verify the path.")
+                st.error("❌ File not found or its media type is not allowed.")
 
 with col_right:
     with st.container(border=True):
@@ -488,7 +481,7 @@ with col_right:
             "Choose mode:",
             ["🎬 Videos & Subtitles (SRT/VTT)", "📋 Meeting Notes & Adaptive MOM"],
             index=0,
-            help="Subtitles creates broadcast-timed cues and scene synopsis. Meeting Notes creates an adaptive executive report with decisions and action items."
+            help="Subtitles creates timed cues and an optional transcript-based synopsis. Meeting Notes creates an adaptive report with decisions and action items."
         )
 
         st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
@@ -519,23 +512,22 @@ with col_right:
             # Video Intelligence (Serving Videos with LLM)
             if llm_available:
                 generate_video_synopsis = st.checkbox(
-                    "🎬 Generate AI Video Synopsis & Scene Breakdown",
+                    "🎬 Generate Transcript-Based Video Synopsis",
                     value=True,
-                    help="Uses the LLM to generate an executive synopsis, chapter timeline, and key takeaways."
+                    help="Analyzes the audio transcript. It does not inspect video frames or visual scenes."
                 )
 
         else:
             # Meeting Notes Settings
             if llm_available:
-                b_badge = "llm-badge-local" if backend_info["has_local"] else "llm-badge-active"
                 st.markdown(
-                    f'<span class="llm-badge {b_badge}">🧠 Adaptive Executive MOM</span>'
+                    '<span class="llm-badge llm-badge-active">🧠 API-Powered Adaptive Executive MOM</span>'
                     '<span style="margin-left: 0.5rem; color: #9CA3AF; font-size: 0.82rem;">'
                     'Tailored to transcript • Executive Summary • Decisions • Action Items</span>',
                     unsafe_allow_html=True
                 )
             else:
-                st.caption("Rule-based structured dialogue turns and highlights.")
+                st.warning("Add an OpenAI or Gemini API key to enable professional meeting minutes.")
 
             enable_trans = st.checkbox("🌍 Translate Meeting Notes into English", value=False)
             target_lang_code = "en"
@@ -555,11 +547,12 @@ with col_right:
                     exact_speakers = None
 
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        intelligence_requires_api = pipeline_mode.startswith("📋") or enable_trans or generate_video_synopsis
         start_btn = st.button(
             "🚀 Run Pipeline",
             type="primary",
             use_container_width=True,
-            disabled=(media_path is None)
+            disabled=(media_path is None or (intelligence_requires_api and not llm_available))
         )
 
 
@@ -574,29 +567,43 @@ if start_btn and media_path:
     stage_status = st.empty()
     overall_progress = st.progress(0.0)
     live_detail_box = st.empty()
+    job_temp_dir: Optional[Path] = None
 
     try:
         t0 = time.time()
+        alignment_model_name = None
+        diarization_model_name = None
+        if uploaded_media is not None:
+            upload_temp_dir = Path(tempfile.mkdtemp(prefix="coherex_upload_"))
+            safe_suffix = Path(media_display_name).suffix.lower()
+            temp_media_path = upload_temp_dir / f"input{safe_suffix}"
+            temp_media_path.write_bytes(uploaded_media.getbuffer())
+            media_path = str(temp_media_path)
         
         # Step 1: Audio Extraction
         stage_status.info(f"🔊 **Step 1/{total_steps}: Extracting and normalizing 16kHz audio...**")
         overall_progress.progress(0.10)
-        audio_extracted_path = extract_audio_from_video(media_path)
+        job_temp_dir = Path(tempfile.mkdtemp(prefix="coherex_job_"))
+        audio_extracted_path = extract_audio_from_video(
+            media_path,
+            output_path=job_temp_dir / "normalized.wav",
+        )
         audio_array = coherex.load_audio(str(audio_extracted_path))
         live_detail_box.caption(f"✅ Audio extracted: {len(audio_array)/16000:.1f}s duration.")
 
         # Step 2: ASR Transcription
         stage_status.info(f"🎙️ **Step 2/{total_steps}: Transcribing with {model_desc}...**")
         overall_progress.progress(0.25)
-        asr_model = get_cohere_model(
-            model_name=active_model_id,
-            language_code=(None if lang_code == "auto" else lang_code),
-            batch_size=batch_size
-        )
+        asr_model = get_cohere_model(model_name=active_model_id)
+        transcription_language = lang_code
+        if lang_code == "auto":
+            stage_status.info(f"🔎 **Step 2/{total_steps}: Detecting the spoken language...**")
+            transcription_language = coherex.detect_language(asr_model, audio_array)
         
         vad_options = {"vad_onset": vad_onset, "vad_offset": vad_offset}
         asr_result = asr_model.transcribe(
             audio_array,
+            language=transcription_language,
             batch_size=batch_size,
             vad_options=vad_options
         )
@@ -608,6 +615,10 @@ if start_btn and media_path:
         overall_progress.progress(0.45)
         try:
             align_model, align_metadata = get_align_model(language_code=detected_lang)
+            alignment_model_name = (
+                getattr(getattr(align_model, "config", None), "_name_or_path", None)
+                or type(align_model).__name__
+            )
             aligned_result = coherex.align(
                 asr_result["segments"],
                 align_model,
@@ -627,6 +638,7 @@ if start_btn and media_path:
             overall_progress.progress(0.60)
             try:
                 diarize_pipe = get_diarize_pipeline(hf_token=hf_token)
+                diarization_model_name = getattr(diarize_pipe, "model_name", type(diarize_pipe).__name__)
                 diarize_kwargs = {}
                 if exact_speakers:
                     diarize_kwargs["num_speakers"] = int(exact_speakers)
@@ -635,14 +647,16 @@ if start_btn and media_path:
                     diarize_kwargs["max_speakers"] = 8
                     
                 diarize_segments = diarize_pipe(audio_array, **diarize_kwargs)
-                final_result = coherex.assign_word_speakers(diarize_segments, final_result, fill_nearest=True)
+                final_result = coherex.assign_word_speakers(diarize_segments, final_result, fill_nearest=False)
                 detected_spk_count = len(set(seg.get("speaker") for seg in final_result.get("segments", []) if seg.get("speaker")))
                 live_detail_box.caption(f"✅ Diarization identified {detected_spk_count} distinct speakers.")
             except Exception as diarize_err:
                 live_detail_box.caption(f"ℹ️ Diarization note: {diarize_err}")
 
-        # Step 5: Subtitle Translation
-        if enable_trans:
+        source_result = final_result
+
+        # Step 5: Translation
+        if enable_trans and not is_meeting_mode:
             trans_engine = "🧠 AI-Powered" if use_llm_pipeline else "⚡ Fast"
             stage_status.info(f"🌍 **Step 5/{total_steps}: {trans_engine} Translation into [{target_lang_code.upper()}]...**")
             overall_progress.progress(0.75)
@@ -652,22 +666,36 @@ if start_btn and media_path:
                 source_lang=detected_lang,
                 bilingual=is_bilingual,
                 use_llm=use_llm_pipeline,
+                provider=selected_provider,
                 gemini_api_key=gemini_key_input,
+                openai_api_key=openai_key_input,
+                groq_api_key=groq_key_input,
+                model=selected_model,
             )
             live_detail_box.caption(f"✅ Translated into {target_lang_code.upper()}.")
 
         # Step 6: LLM Intelligence (MOM or Video Synopsis)
         video_synopsis_text = None
+        active_llm = None
         if use_llm_pipeline:
             from coherex.llm import get_llm_client
-            active_llm = get_llm_client(gemini_api_key=gemini_key_input, openai_api_key=openai_key_input)
+            active_llm = get_llm_client(
+                provider=selected_provider,
+                gemini_api_key=gemini_key_input,
+                openai_api_key=openai_key_input,
+                groq_api_key=groq_key_input,
+                openai_model=selected_model if selected_provider == "openai" else None,
+                groq_model=selected_model if selected_provider == "groq" else None,
+                gemini_model=selected_model if selected_provider == "gemini" else None,
+                force_new=True,
+            )
 
             if is_meeting_mode:
                 stage_status.info(f"🧠 **Step {total_steps}/{total_steps}: Generating Adaptive Meeting Minutes...**")
                 overall_progress.progress(0.90)
                 live_detail_box.caption("Analyzing full conversation, extracting decisions, action items, and strategic topics...")
             elif generate_video_synopsis and active_llm:
-                stage_status.info(f"🎬 **Step {total_steps}/{total_steps}: Generating AI Video Synopsis & Scene Breakdown...**")
+                stage_status.info(f"🎬 **Step {total_steps}/{total_steps}: Generating transcript-based video synopsis...**")
                 overall_progress.progress(0.90)
                 try:
                     all_text = " ".join(s.get("text", "") for s in final_result.get("segments", []))
@@ -684,8 +712,9 @@ if start_btn and media_path:
         elapsed = time.time() - t0
 
         # Save to Disk in Dedicated Folder
-        stem_name = Path(media_display_name).stem
-        run_output_dir = OUTPUTS_DIR / stem_name
+        stem_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(media_display_name).stem).strip("._") or "media"
+        run_id = f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        run_output_dir = OUTPUTS_DIR / f"{stem_name}_{run_id}"
         run_output_dir.mkdir(parents=True, exist_ok=True)
         saved_paths = {}
 
@@ -693,6 +722,19 @@ if start_btn and media_path:
             cues_orig = generate_subtitles_from_segments(final_result.get("segments", []), max_chars_line, max_lines_cue, use_translated=False)
             cues_trans = generate_subtitles_from_segments(final_result.get("segments", []), max_chars_line, max_lines_cue, use_translated=True)
             cues_bilingual = generate_subtitles_from_segments(final_result.get("segments", []), max_chars_line, max_lines_cue, use_translated=True, bilingual=True)
+
+            qc_reports = {
+                "source": validate_subtitle_cues(cues_orig, max_chars_line, max_lines_cue),
+            }
+            if enable_trans:
+                qc_reports["translated"] = validate_subtitle_cues(cues_trans, max_chars_line, max_lines_cue)
+                qc_reports["bilingual"] = validate_subtitle_cues(cues_bilingual, max_chars_line, 2)
+            hard_errors = [error for report in qc_reports.values() for error in report["errors"]]
+            if hard_errors:
+                raise RuntimeError("Subtitle quality validation failed: " + "; ".join(hard_errors[:5]))
+            qc_path = run_output_dir / f"{stem_name}_subtitle_qc.json"
+            qc_path.write_text(json.dumps(qc_reports, indent=2, ensure_ascii=False), encoding="utf-8")
+            saved_paths["subtitle_qc"] = qc_path
 
             orig_srt = run_output_dir / f"{stem_name}_{detected_lang}.srt"
             orig_srt.write_text(export_srt(cues_orig), encoding="utf-8")
@@ -730,12 +772,17 @@ if start_btn and media_path:
             today = datetime.now().strftime("%Y-%m-%d")
 
             notes_ar = generate_meeting_notes_markdown(
-                final_result,
+                source_result,
                 title=f"Meeting Minutes - {stem_name}",
                 use_translated=False,
+                provider=selected_provider,
                 gemini_api_key=gemini_key_input,
+                openai_api_key=openai_key_input,
+                groq_api_key=groq_key_input,
+                model=selected_model,
                 meeting_date=today,
                 use_llm=use_llm_pipeline,
+                allow_heuristic_fallback=False,
             )
             md_ar_path = run_output_dir / f"{stem_name}_meeting_notes_ar.md"
             md_ar_path.write_text(notes_ar, encoding="utf-8")
@@ -744,14 +791,12 @@ if start_btn and media_path:
             saved_paths["_llm_used"] = use_llm_pipeline and ("## ✅ Decisions" in notes_ar or "## 🎯 Action Items" in notes_ar or "## Meeting Overview" in notes_ar)
 
             if enable_trans:
-                notes_trans = generate_meeting_notes_markdown(
-                    final_result,
-                    title=f"Meeting Notes (EN) - {stem_name}",
-                    use_translated=True,
+                if active_llm is None:
+                    raise RuntimeError("Meeting-note translation requires a configured LLM provider")
+                notes_trans = active_llm.translate_meeting_notes(
+                    notes_ar,
+                    source_lang=detected_lang,
                     target_lang=target_lang_code,
-                    gemini_api_key=gemini_key_input,
-                    meeting_date=today,
-                    use_llm=use_llm_pipeline,
                 )
                 md_trans_path = run_output_dir / f"{stem_name}_meeting_notes_{target_lang_code}.md"
                 md_trans_path.write_text(notes_trans, encoding="utf-8")
@@ -769,6 +814,29 @@ if start_btn and media_path:
                 json.dump(final_result, jf, indent=2, ensure_ascii=False)
             saved_paths["json"] = json_path
 
+        llm_provider = getattr(active_llm, "provider_name", None) if active_llm else None
+        llm_model = None
+        if active_llm:
+            if hasattr(active_llm, "get_active_model"):
+                llm_model = active_llm.get_active_model()
+            else:
+                llm_model = getattr(active_llm, "model", None)
+        models_used = {
+            "asr": {"model": active_model_id, "language": detected_lang},
+            "alignment": {"model": alignment_model_name, "enabled": alignment_model_name is not None},
+            "diarization": {"model": diarization_model_name, "enabled": bool(enable_diarization)},
+            "llm": {
+                "provider": llm_provider,
+                "model": llm_model,
+                "api_only_mode": True,
+                "used_for_translation": bool(enable_trans and use_llm_pipeline),
+                "used_for_mom_or_synopsis": bool(active_llm and (is_meeting_mode or generate_video_synopsis)),
+            },
+        }
+        models_path = run_output_dir / f"{stem_name}_models_used.json"
+        models_path.write_text(json.dumps(models_used, indent=2, ensure_ascii=False), encoding="utf-8")
+        saved_paths["models_used"] = models_path
+
         st.session_state["last_result"] = final_result
         st.session_state["media_name"] = media_display_name
         st.session_state["saved_paths"] = saved_paths
@@ -779,10 +847,15 @@ if start_btn and media_path:
         live_detail_box.empty()
 
     except Exception as e:
-        stage_status.error(f"❌ Error during execution: {str(e)}")
+        error_id = uuid.uuid4().hex[:8]
+        logging.getLogger("coherex.app").exception("Pipeline error %s", error_id)
+        stage_status.error(f"❌ Pipeline failed (reference `{error_id}`): {str(e)}")
         overall_progress.progress(0.0)
-        with st.expander("🔍 View Error Diagnostics", expanded=True):
-            st.code(traceback.format_exc())
+    finally:
+        if job_temp_dir is not None:
+            shutil.rmtree(job_temp_dir, ignore_errors=True)
+        if upload_temp_dir is not None:
+            shutil.rmtree(upload_temp_dir, ignore_errors=True)
 
 
 # ==============================================================================
@@ -811,6 +884,11 @@ if "last_result" in st.session_state:
     )
     if st.button("📂 Open Run Folder in Explorer", use_container_width=False):
         open_folder(run_dir)
+
+    models_manifest = saved_paths.get("models_used")
+    if models_manifest and Path(models_manifest).exists():
+        with st.expander("🧠 Models used in this run", expanded=False):
+            st.json(json.loads(Path(models_manifest).read_text(encoding="utf-8")))
 
     if mode.startswith("🎬"):
         tab_titles = ["📝 Subtitles Preview"]
